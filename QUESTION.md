@@ -67,4 +67,5 @@ ArrayType *arr = (ArrayType*) tr0;
 Do ArrayType need serialize function? ArrayType is already a varlena type and wondering it is already serialized?
 
 
+6. How to get the Segment ID and total number of segments?
 
