@@ -19,7 +19,8 @@ SELECT avg(c1), avg(c2) from table where c1 > 3;
 the generated SQL is as below,
 
 ```
-SELECT array[count(c1) filter (where c1 > 3), sum(c1) filter (where  c1 > 3)], array[count(c2) filter (where c1 > 3) from table where c1 > 3;
+SELECT array[count(c1) filter (where c1 > 3), sum(c1) filter (where  c1 > 3)], 
+array[count(c2) filter (where c1 > 3), sum(c2) filter(where c1 > 3)] from table where c1 > 3;
 ```
 
 
