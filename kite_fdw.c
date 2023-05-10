@@ -2302,7 +2302,8 @@ kiteGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	/* Ignore stages we don't support; and skip any duplicate calls. */
 	/* KITE don't support ORDER BY */
 	if ((stage != UPPERREL_GROUP_AGG &&
-			stage != UPPERREL_FINAL) ||
+			stage != UPPERREL_FINAL &&
+			stage != UPPERREL_CDB_FIRST_STAGE_GROUP_AGG) ||
 		output_rel->fdw_private)
 		return;
 
@@ -2312,6 +2313,13 @@ kiteGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	output_rel->fdw_private = fpinfo;
 
 	switch (stage) {
+	case UPPERREL_CDB_FIRST_STAGE_GROUP_AGG:
+		/* It's unsafe to push having statements with partial aggregates */
+		if(((GroupPathExtraData *) extra)->havingQual) {
+			return;
+		}
+		/* Fall through */
+		/* Partial agg push down path */
 	case UPPERREL_GROUP_AGG:
 		add_foreign_grouping_paths(root, input_rel, output_rel,
 			(GroupPathExtraData *)extra);
