@@ -80,7 +80,7 @@ Datum int64_sum_aggstate_create(PG_FUNCTION_ARGS)
 
 Datum int128_sum_aggstate_create(PG_FUNCTION_ARGS)
 {
-	int128 sum = *((int128 *) PG_GETARG_POINTER(1));
+	int128 sum = *((int128 *) PG_GETARG_POINTER(0));
 
 	return serialized_polynumaggstate;
 }
