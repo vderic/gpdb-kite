@@ -56,7 +56,7 @@ tr0->arraytype.elemtype = FLOAT8OID;
 tr0->nelem = 3;
 tr0->data[0] =  N;
 tr0->data[1] =  sumX;
-tr0->data[2] = 0;   // sumX2
+tr0->data[2] = sumX * sumX;
 
 
 ArrayType *arr = (ArrayType*) tr0;
