@@ -5,6 +5,7 @@
 #include "utils/timestamp.h"
 #include "utils/numeric.h"
 #include "utils/fmgrprotos.h"
+#include "numeric.hpp"
 
 #define POSTGRES_SUM_NUMERIC 1
 

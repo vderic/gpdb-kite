@@ -22,7 +22,6 @@
 #include "commands/defrem.h"
 #include "commands/explain.h"
 #include "commands/vacuum.h"
-#include "executor/execAsync.h"
 #include "foreign/fdwapi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -56,6 +55,9 @@
 #include "schema.h"
 #include "decode.h"
 #include "agg.h"
+
+/* source-code-compatibility hacks for pull_varnos() API change */
+#define make_restrictinfo(a,b,c,d,e,f,g,h,i) make_restrictinfo_new(a,b,c,d,e,f,g,h,i)
 
 PG_MODULE_MAGIC;
 
@@ -578,9 +580,9 @@ kiteGetForeignPlan(PlannerInfo *root,
 	 * Get FDW private data created by kiteGetForeignUpperPaths(), if any.
 	 */
 	if (best_path->fdw_private) {
-		has_final_sort = boolVal(list_nth(best_path->fdw_private,
+		has_final_sort = intVal(list_nth(best_path->fdw_private,
 			FdwPathPrivateHasFinalSort));
-		has_limit = boolVal(list_nth(best_path->fdw_private,
+		has_limit = intVal(list_nth(best_path->fdw_private,
 			FdwPathPrivateHasLimit));
 	}
 
@@ -977,9 +979,6 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 			&fsstate->param_values);
 
 #endif
-	/* Set the async-capable flag */
-	fsstate->async_capable = node->ss.ps.async_capable;
-
 	/*
 	 * Prepare xrg_agg
 	 */
@@ -1350,7 +1349,16 @@ estimate_path_cost_size(PlannerInfo *root,
 			/* Collect statistics about aggregates for estimating costs. */
 			MemSet(&aggcosts, 0, sizeof(AggClauseCosts));
 			if (root->parse->hasAggs) {
-				get_agg_clause_costs(root, AGGSPLIT_SIMPLE, &aggcosts);
+				get_agg_clause_costs(root, (Node *) fpinfo->grouped_tlist,
+									AGGSPLIT_SIMPLE, &aggcosts);
+
+                                /*
+                                 * The cost of aggregates in the HAVING qual will be the same
+                                 * for each child as it is for the parent, so there's no need
+                                 * to use a translated version of havingQual.
+                                 */
+                                get_agg_clause_costs(root, (Node *) root->parse->havingQual,
+                                                                         AGGSPLIT_SIMPLE, &aggcosts);
 			}
 
 			/* Get number of grouping columns and possible number of groups */
@@ -1358,7 +1366,7 @@ estimate_path_cost_size(PlannerInfo *root,
 			numGroups = estimate_num_groups(root,
 				get_sortgrouplist_exprs(root->parse->groupClause,
 					fpinfo->grouped_tlist),
-				input_rows, NULL, NULL);
+				input_rows, NULL);
 
 			/*
 			 * Get the retrieved_rows and rows estimates.  If there are HAVING
@@ -1753,9 +1761,9 @@ fetch_more_data(ForeignScanState *node) {
 				fsstate->fetch_ct_2++;
 		}
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
-		;
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
@@ -2616,8 +2624,8 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Build the fdw_private list that will be used by kiteGetForeignPlan.
 	 * Items in the list must match order in enum FdwPathPrivateIndex.
 	 */
-	fdw_private = list_make2(makeBoolean(has_final_sort),
-		makeBoolean(extra->limit_needed));
+	fdw_private = list_make2(makeInteger(has_final_sort),
+		makeInteger(extra->limit_needed));
 
 	/*
 	 * Create foreign final path; this gets rid of a no-longer-needed outer
@@ -3102,13 +3110,16 @@ static bool kite_get_relation_stats(PgFdwRelationInfo *fpinfo, Relation relation
 
 		elog(LOG, "Analyze totalrows = %ld, totalpages = %u", nrow, *totalpages);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		if (agg) xrg_agg_destroy(agg);
 		ReleaseConnection(req);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
+	if (agg) xrg_agg_destroy(agg);
+	ReleaseConnection(req);
 	return true;
 }
 
@@ -3280,11 +3291,14 @@ kiteAcquireSampleRowsFunc(Relation relation, int elevel,
 
 		elog(LOG, "Analyze sample received %d rows, targrows =%d", astate.numrows, astate.targrows);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		ReleaseConnection(req);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	ReleaseConnection(req);
 
 	/* We assume that we have no dead tuple */
 	*totaldeadrows = 0;

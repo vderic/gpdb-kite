@@ -547,5 +547,5 @@ _PG_init(void)
 							   NULL,
 							   NULL);
 
-	MarkGUCPrefixReserved("kite_fdw");
+	//MarkGUCPrefixReserved("kite_fdw");
 }

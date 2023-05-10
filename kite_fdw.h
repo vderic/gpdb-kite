@@ -146,13 +146,11 @@ typedef struct PgFdwRelationInfo
  */
 typedef struct PgFdwConnState
 {
-	AsyncRequest *pendingAreq;	/* pending async request */
 } PgFdwConnState;
 
 /* in postgres_fdw.c */
 extern int	set_transmission_modes(void);
 extern void reset_transmission_modes(int nestlevel);
-extern void process_pending_request(AsyncRequest *areq);
 
 /* in connection.c */
 #ifdef KITE_CONNECT
