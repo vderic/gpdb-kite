@@ -30,7 +30,7 @@ The expect SQL is as below,
 SELECT array[count(c1), sum(c1)], array[count(c2), sum(c2)] from table where c1 > 3
 ```
 
-4. In transcoding.c, a lot of code copied from numeric.c.  Can you expose the data structure and functions in numeric.h instead?
+4. In transcoding.c, a lot of code copied from numeric.c.  Can you expose the data structure and functions in numeric.h or new header file numeric_api.h instead?
 
 
 5. Average for float and double is not done yet.
