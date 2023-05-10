@@ -32,6 +32,67 @@ SELECT array[count(c1), sum(c1)], array[count(c2), sum(c2)] from table where c1 
 
 4. In transcoding.c, a lot of code copied from numeric.c.  Can you expose the data structure and functions in numeric.h or new header file numeric_api.h instead?
 
+Suggested APIs
+
+```
+
+Datum int64_avg_aggstate_create(PG_FUNCTION_ARGS)
+{
+	int64 count = PG_GETARG_INT64(0);
+	int64 sum = PG_GETARG_INT64(1);
+
+
+	return serialized_polynumaggstate;
+}
+
+
+Datum int128_avg_aggstate_create(PG_FUNCTION_ARGS)
+{
+	int64 count = PG_GETARG_INT64(0);
+	int128 sum = *((int128 *) PG_GETARG_POINTER(1));
+
+	return serialized_polynumaggstate;
+}
+
+Datum numeric_avg_aggstate_create(PG_FUNCTION_ARGS)
+{
+	int64 count = (int64) PG_GETARG_INT64(0);
+	Numeric sum = PG_GETARG_NUMERIC(1);
+
+	return serialized_numericaggstate;
+}
+
+Datum float8_avg_aggstate_create(PG_FUNCTION_ARGS)
+{
+	int64 count = PG_GETARG_INT64(0);
+	float8 sum = PG_GETARG_FLOAT8(1);
+
+	return arraytype;
+}
+
+Datum int64_sum_aggstate_create(PG_FUNCTION_ARGS)
+{
+	int64 sum = PG_GETARG_INT64(0);
+
+	return serialized_polynumaggstate;
+}
+
+
+Datum int128_sum_aggstate_create(PG_FUNCTION_ARGS)
+{
+	int128 sum = *((int128 *) PG_GETARG_POINTER(1));
+
+	return serialized_polynumaggstate;
+}
+
+Datum numeric_sum_aggstate_create(PG_FUNCTION_ARGS)
+{
+	Numeric sum = PG_GETARG_NUMERIC(0));
+
+	return serialized_numericaggstate;
+}
+
+```
 
 5. Average for float and double is not done yet.
 
