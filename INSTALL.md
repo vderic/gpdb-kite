@@ -1,7 +1,7 @@
 Install GPDB7
 =============
 
-* Compile python from source
+## Compile python from source
 
 ```
 sudo apt-get install libffi-dev
@@ -32,7 +32,7 @@ sudo ln -s /opt/python/3.10.11/lib/libpython3.so libpython3.so
 
 ```
 
-* For Ubuntu:
+## For Ubuntu:
 
 - Install Dependencies When you run the README.Ubuntu.bash script for dependencies, you will be asked to configure realm for kerberos. You can enter any realm, since this is just for testing, and during testing, it will reconfigure a local server/client. If you want to skip this manual configuration, use: export DEBIAN_FRONTEND=noninteractive
 
@@ -48,3 +48,20 @@ sudo apt-get update
 sudo apt-get install -y gcc-7 g++-7
 ```
 
+## Build the database
+
+```
+# Initialize and update submodules in the repository
+git submodule update --init
+
+# Configure build environment to install at /usr/local/gpdb
+./configure --with-perl --with-python --with-libxml --with-gssapi --prefix=/usr/local/gpdb
+
+# Compile and install
+make -j8
+make -j8 install
+
+# Bring in greenplum environment into your running shell
+source /usr/local/gpdb/greenplum_path.sh
+
+```
