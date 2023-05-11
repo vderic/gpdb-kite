@@ -1095,21 +1095,33 @@ PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
     }
 	switch (aggfnoid) 
 	{
-		case 2100:
+		case 2100:  // avg bigint
+			refnaddr = avg_p_int128;
+			break;
+		case 2101:  // avg integer
+		case 2102:  // avg smallint
+			refnaddr = avg_p_int64;
+			break;
 		case 2107:
 			/* Those aggregate functions have same type of aggstate -- PolyNumAggState.
 			 * - 2100 pg_catalog.avg int8|bigint
 			 * - 2107 pg_catalog.sum int8|bigint
 			 */
-			refnaddr = transfn_to_polynumaggstate;
+			refnaddr = sum_p_int128;
 			break;
 		case 2103:
+			refnaddr = avg_p_numeric;
+			break;
 		case 2114:
 			/* Those aggregate functions have same type of aggstate -- NumericAggState.
 			 * - 2103 pg_catalog.avg numeric
 			 * - 2114 pg_catalog.sum numeric
 			 */
-			refnaddr = transfn_to_numericaggstate;
+			refnaddr = sum_p_numeric;
+			break;
+		case 2104:
+		case 2105:
+			refnaddr = avg_p_float8;
 			break;
 		default:
 			break;
