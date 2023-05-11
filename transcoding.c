@@ -34,6 +34,7 @@
  */
 #include "postgres.h"
 #include "kite_fdw.h"
+#include "transcoding.h"
 
 #include "fmgr.h"
 #include "utils/array.h"
@@ -949,58 +950,57 @@ static Datum transfn_to_polynumaggstate(PG_FUNCTION_ARGS)
 	return CallAggfunction1(&flinfo, (Datum)internal_polynum, (fmNodePtr *)aggstate);
 }
 
-static Datum avg_p_int64(PG_FUNCTION_ARGS) {
+/* int */
+static Datum agg_p_int128(int64 count, int128 sum) {
 	PolyNumAggState *state;
 	AggState *aggstate = NULL;
 	FmgrInfo flinfo;
 
+	state = makePolyNumAggStateCurrentContext(false);
+	state->N = count;
+#ifdef HAVE_INT128
+	state->sumX = sum;
+#else
+	// error out
+#endif
+
+	memset(&flinfo, 0, sizeof(FmgrInfo));
+	fmgr_info_cxt(fmgr_internal_function("int8_avg_serialize"), &flinfo, CurrentMemoryContext);
+	aggstate = GetFakeAggState();
+
+	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)aggstate);
+}
+
+Datum avg_p_int64(PG_FUNCTION_ARGS) {
 	int64 count = PG_GETARG_INT64(0);
 	int64 sum = PG_GETARG_INT64(1);
- 
-	state = makePolyNumAggStateCurrentContext(false);
-	state->N = count;
-#ifdef HAVE_INT128
-	state->sumX = sum;
-#else
-	// error out
-#endif
-
-	memset(&flinfo, 0, sizeof(FmgrInfo));
-	fmgr_info_cxt(fmgr_internal_function("int8_avg_serialize"), &flinfo, CurrentMemoryContext);
-	aggstate = GetFakeAggState();
-	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)aggstate);
-
-
-	return NULL;
+	return agg_p_int128(count, sum);
 }
 
-static Datum avg_p_int128(PG_FUNCTION_ARGS) {
-	PolyNumAggState *state;
-	AggState *aggstate = NULL;
-	FmgrInfo flinfo;
+Datum avg_p_int128(PG_FUNCTION_ARGS) {
 	int64 count = PG_GETARG_INT64(0);
 	int128 sum = *((int128 *) PG_GETARG_POINTER(1));
-
-	state = makePolyNumAggStateCurrentContext(false);
-	state->N = count;
-#ifdef HAVE_INT128
-	state->sumX = sum;
-#else
-	// error out
-#endif
-
-	memset(&flinfo, 0, sizeof(FmgrInfo));
-	fmgr_info_cxt(fmgr_internal_function("int8_avg_serialize"), &flinfo, CurrentMemoryContext);
-	aggstate = GetFakeAggState();
-	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)aggstate);
+	return agg_p_int128(count, sum);
 }
 
-static Datum avg_p_numeric(PG_FUNCTION_ARGS) {
+Datum sum_p_int64(PG_FUNCTION_ARGS) {
+	int64 count = 1;
+	int64 sum = PG_GETARG_INT64(0);
+	return agg_p_int128(count, sum);
+}
+
+Datum sum_p_int128(PG_FUNCTION_ARGS) {
+	int64 count = 1;
+	int128 sum = *((int128 *) PG_GETARG_POINTER(0));
+	return agg_p_int128(count, sum);
+}
+
+
+/* numeric */
+static Datum agg_p_numeric(int64 count, Numeric sum) {
 	NumericAggState *state;
 	AggState *aggstate = NULL;
 	FmgrInfo flinfo;
-	int64 count = (int64) PG_GETARG_INT64(0);
-	Numeric sum = PG_GETARG_NUMERIC(1);
 
 	state = makeNumericAggStateCurrentContext(false);
 	state->N = count;
@@ -1013,7 +1013,20 @@ static Datum avg_p_numeric(PG_FUNCTION_ARGS) {
 	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)aggstate);
 }
 
-static Datum avg_p_float8(PG_FUNCTION_ARGS) {
+Datum avg_p_numeric(PG_FUNCTION_ARGS) {
+	int64 count = (int64) PG_GETARG_INT64(0);
+	Numeric sum = PG_GETARG_NUMERIC(1);
+	return agg_p_numeric(count, sum);
+}
+
+Datum sum_p_numeric(PG_FUNCTION_ARGS) {
+	int64 count = 1;
+	Numeric sum = PG_GETARG_NUMERIC(0);
+	return agg_p_numeric(count, sum);
+}
+
+/* float8 */
+Datum avg_p_float8(PG_FUNCTION_ARGS) {
 	FloatAvgAggState *state;
 	FmgrInfo flinfo;
 	int64 count = PG_GETARG_INT64(0);
@@ -1032,28 +1045,6 @@ static Datum avg_p_float8(PG_FUNCTION_ARGS) {
 	PG_RETURN_POINTER(state);
 }
 
-#if 0
-static Datum sum_p_int64(PG_FUNCTION_ARGS) {
-	FmgrInfo flinfo;
-	int64 sum = PG_GETARG_INT64(0);
-
-	return NULL;
-}
-
-static Datum sum_p_int128(PG_FUNCTION_ARGS) {
-	FmgrInfo flinfo;
-	int128 sum = *((int128 *) PG_GETARG_POINTER(0));
-
-	return NULL;
-}
-
-static Datum sum_p_numeric(PG_FUNCTION_ARGS) {
-	FmgrInfo flinfo;
-	Numeric sum = PG_GETARG_NUMERIC(0);
-
-	return NULL;
-}
-#endif
 
 /* 
  * Handle trancoding for agg function 2103 and 2114
