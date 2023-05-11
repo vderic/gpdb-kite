@@ -48,6 +48,8 @@
 #include "utils/rel.h"
 #include "utils/sampling.h"
 #include "utils/selfuncs.h"
+#include "cdb/cdbvars.h"
+#include "cdb/cdbgang.h"
 
 #include "kitesdk.h"
 #include "nodes/print.h"
@@ -905,6 +907,16 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 	/* Get info about foreign table. */
 	table = GetForeignTable(rte->relid);
 	user = GetUserMapping(userid, table->serverid);
+
+	if (table->exec_location == FTEXECLOCATION_ALL_SEGMENTS && Gp_role == GP_ROLE_EXECUTE) {
+		// parallel load here
+		int segid = GpIdentity.segindex;
+		int segcnt = getgpsegmentCount();
+
+	} else {
+		// single server
+		int segid = -1;
+	}
 
 	/* KITE */
 	fsstate->req = GetConnection(user, false, &fsstate->conn_state);
