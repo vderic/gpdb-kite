@@ -1,5 +1,5 @@
 #include "pg_aggstate.c"
-#include "transcode.h"
+#include "aggtrans.h"
 
 #define INIT_AGGSTATE(aggstate) \
 { \

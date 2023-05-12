@@ -1,5 +1,5 @@
-#ifndef _TRANSCODE_H_
-#define _TRANSCODE_H_
+#ifndef _AGGTRANS_H_
+#define _AGGTRANS_H_
 
 Datum avg_p_int64(PG_FUNCTION_ARGS);
 Datum avg_p_int128(PG_FUNCTION_ARGS);

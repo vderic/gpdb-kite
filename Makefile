@@ -16,7 +16,7 @@ OBJS = \
 	dec.o \
 	exx_int.o \
 	agg.o \
-	transcode.o
+	aggtrans.o
 
 all: ext $(OBJS)
 
