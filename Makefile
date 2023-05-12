@@ -15,6 +15,7 @@ OBJS = \
 	numeric.o \
 	dec.o \
 	exx_int.o \
+	partial_agg.o \
 	agg.o \
 	aggtrans.o
 

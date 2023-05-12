@@ -57,6 +57,7 @@
 #include "schema.h"
 #include "decode.h"
 #include "agg.h"
+#include "partial_agg.h"
 
 /* source-code-compatibility hacks for pull_varnos() API change */
 #define make_restrictinfo(a,b,c,d,e,f,g,h,i) make_restrictinfo_new(a,b,c,d,e,f,g,h,i)
@@ -126,7 +127,7 @@ typedef struct PgFdwScanState {
 
 	/* for remote query execution */
 	xrg_agg_t *agg;		 /* xrg_agg_t for aggregate */
-	xrg_agg_t *partial_agg;		 /* xrg_partial_agg_t for aggregate */
+	xrg_agg_p_t *partial_agg;		 /* xrg_partial_agg_t for aggregate */
 	kite_request_t *req; /* kite connectino for the scan */
 	bool mpp_allsegment; /* mpp allsegment */
 	int fragid; /* fragment id */
@@ -1019,7 +1020,9 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 	fsstate->partial_agg = NULL;
 	if (fsstate->retrieved_aggfnoids) {
 		if (fsstate->mpp_allsegment) {
-			fsstate->partial_agg = NULL;
+			fsstate->partial_agg = xrg_agg_p_init(fsstate->retrieved_attrs,
+				fsstate->retrieved_aggfnoids,
+				fsstate->retrieved_groupby_attrs);
 
 		} else {
 			fsstate->agg = xrg_agg_init(fsstate->retrieved_attrs,
@@ -1101,6 +1104,11 @@ kiteEndForeignScan(ForeignScanState *node) {
 	if (fsstate->agg) {
 		xrg_agg_destroy(fsstate->agg);
 		fsstate->agg = 0;
+	}
+	
+	if (fsstate->partial_agg) {
+		xrg_agg_p_destroy(fsstate->partial_agg);
+		fsstate->partial_agg = 0;
 	}
 
 	/* MemoryContexts will be deleted automatically. */
