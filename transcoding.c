@@ -42,7 +42,13 @@
 #include "utils/numeric.h"
 #include "nodes/execnodes.h"
 
-static AggState *g_aggstate = NULL;
+
+#define INIT_AGGSTATE(aggstate) \
+{ \
+	Node *node = (Node *) aggstate; \
+	memset(aggstate, 0, sizeof(AggState)); \
+	node->type = T_AggState; \
+} 
 
 /* Start of dependencies of internal struct from float8 */
 typedef struct FloatAvgAggState
@@ -884,21 +890,7 @@ typedef Int128AggState PolyNumAggState;
 typedef NumericAggState PolyNumAggState;
 #define makePolyNumAggStateCurrentContext makeNumericAggStateCurrentContext
 #endif
-typedef struct Int8TransTypeData
-{
-	int64		count;
-	int64		sum;
-} Int8TransTypeData;
 /* End of depandancies of internal struct from numeric.c */
-
-/* Make fake AggState to call agg functions */
-static AggState *GetFakeAggState()
-{
-	if (! g_aggstate) {
-		g_aggstate = makeNode(AggState);
-	}
-	return g_aggstate;
-}
 
 static Datum CallAggfunction1(FmgrInfo *flinfo, Datum arg1, fmNodePtr *context)
 {
@@ -915,8 +907,9 @@ static Datum CallAggfunction1(FmgrInfo *flinfo, Datum arg1, fmNodePtr *context)
 /* int */
 static Datum agg_p_int128(int64 count, int128 sum) {
 	PolyNumAggState *state;
-	AggState *aggstate = NULL;
+	AggState aggstate;
 	FmgrInfo flinfo;
+
 
 	state = makePolyNumAggStateCurrentContext(false);
 	state->N = count;
@@ -928,9 +921,9 @@ static Datum agg_p_int128(int64 count, int128 sum) {
 
 	memset(&flinfo, 0, sizeof(FmgrInfo));
 	fmgr_info_cxt(fmgr_internal_function("int8_avg_serialize"), &flinfo, CurrentMemoryContext);
-	aggstate = GetFakeAggState();
 
-	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)aggstate);
+	INIT_AGGSTATE(&aggstate);
+	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)&aggstate);
 }
 
 Datum avg_p_int64(PG_FUNCTION_ARGS) {
@@ -961,7 +954,7 @@ Datum sum_p_int128(PG_FUNCTION_ARGS) {
 /* numeric */
 static Datum agg_p_numeric(int64 count, Numeric sum) {
 	NumericAggState *state;
-	AggState *aggstate = NULL;
+	AggState aggstate;
 	FmgrInfo flinfo;
 
 	state = makeNumericAggStateCurrentContext(false);
@@ -971,8 +964,9 @@ static Datum agg_p_numeric(int64 count, Numeric sum) {
 
 	memset(&flinfo, 0, sizeof(FmgrInfo));
 	fmgr_info_cxt(fmgr_internal_function("numeric_avg_serialize"), &flinfo, CurrentMemoryContext);
-	aggstate = GetFakeAggState();
-	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)aggstate);
+
+	INIT_AGGSTATE(&aggstate);
+	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)&aggstate);
 }
 
 Datum avg_p_numeric(PG_FUNCTION_ARGS) {
