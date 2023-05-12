@@ -296,7 +296,7 @@ int agg_p_decode2(Oid aggfnoid, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_
 
 	PGFunction fn = GetTranscodingFnFromOid(aggfnoid);
 	if (!fn) {
-		elog(ERROR, "agg_p_decode2: not aggfn found");
+		elog(ERROR, "agg_p_decode2: not aggfn found. aggfnoid = %d", aggfnoid);
 		return 1;
 	}
 
