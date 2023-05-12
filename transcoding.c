@@ -908,48 +908,7 @@ static Datum CallAggfunction1(FmgrInfo *flinfo, Datum arg1, fmNodePtr *context)
 	return FunctionCallInvoke(fcinfo);
 }
 
-/* 
- * Handle trancoding for agg function 2100 and 2107
- * The input str is formatted like {$count, $sum} 
- * 1. Transcode the input str into ArrayType whose data type is int64
- * 2. Construct internal type PolyNumAggState
- * 3. Serialize PolyNumAggState into bytea
- */
-static Datum transfn_to_polynumaggstate(PG_FUNCTION_ARGS)
-{
-	ArrayType	*internal_array = NULL;
-	char		*str = PG_GETARG_CSTRING(0);
-	Oid			element_type = INT8OID;
-	int32		typmod = PG_GETARG_INT32(2);
-	Int8TransTypeData *transdata = NULL;
-	PolyNumAggState *internal_polynum;
-	FmgrInfo flinfo;
-	AggState *aggstate = NULL;
-
-
-	memset(&flinfo, 0, sizeof(FmgrInfo));
-	fmgr_info_cxt(fmgr_internal_function("array_in"), &flinfo, CurrentMemoryContext);
-	internal_array = (ArrayType *)InputFunctionCall(&flinfo, str, element_type, typmod);
-
-	transdata = (Int8TransTypeData *) ARR_DATA_PTR (internal_array);
-	internal_polynum = makePolyNumAggStateCurrentContext(false);
-	internal_polynum->N = transdata->count;
-#ifdef HAVE_INT128
-	internal_polynum->sumX = (int128)transdata->sum;
-#else
-	Datum sumd;
-	sumd = DirectFunctionCall1(int8_numeric,
-							   Int64GetDatumFast(transdata->sum));
-	do_numeric_accum(internal_polynum, (Numeric)sumd);
-	internal_polynum->N--;
-#endif
-    
-	memset(&flinfo, 0, sizeof(FmgrInfo));
-	fmgr_info_cxt(fmgr_internal_function("int8_avg_serialize"), &flinfo, CurrentMemoryContext);
-	aggstate = GetFakeAggState();
-	return CallAggfunction1(&flinfo, (Datum)internal_polynum, (fmNodePtr *)aggstate);
-}
-
+/* KITE */
 /* int */
 static Datum agg_p_int128(int64 count, int128 sum) {
 	PolyNumAggState *state;
@@ -1046,47 +1005,6 @@ Datum avg_p_float8(PG_FUNCTION_ARGS) {
 }
 
 
-/* 
- * Handle trancoding for agg function 2103 and 2114
- * The input str is formatted like {$count, $sum} 
- * 1. Transcode the input str into ArrayType whose data type is numeric
- * 2. Construct internal type NumericAggState
- * 3. Serialize NumericAggState into bytea
- */
-static Datum transfn_to_numericaggstate(PG_FUNCTION_ARGS)
-{
-	ArrayType	*internal_array = NULL;
-	char		*str = PG_GETARG_CSTRING(0);
-	Oid			element_type = NUMERICOID;
-	int32		typmod = PG_GETARG_INT32(2);
-	int64		countd;
-	Datum		sumd;
-	Datum		*internal_numeric;
-	int			num_numeric;
-	NumericAggState *target_state;
-	AggState *aggstate = NULL;
-
-	FmgrInfo flinfo;
-	memset(&flinfo, 0, sizeof(FmgrInfo));
-	fmgr_info_cxt(fmgr_internal_function("array_in"), &flinfo, CurrentMemoryContext);
-	internal_array = (ArrayType *)InputFunctionCall(&flinfo, str, element_type, typmod);
-
-	deconstruct_array(internal_array, NUMERICOID, -1, false, 'i',
-					  &internal_numeric, NULL, &num_numeric);
-
-	countd = (int64)DirectFunctionCall1(numeric_int8, internal_numeric[0]);
-	sumd = internal_numeric[1];
-	target_state = makeNumericAggStateCurrentContext(false);
-	target_state->N = countd;
-	do_numeric_accum(target_state, (Numeric)sumd);
-	target_state->N--;
-
-	memset(&flinfo, 0, sizeof(FmgrInfo));
-	fmgr_info_cxt(fmgr_internal_function("numeric_avg_serialize"), &flinfo, CurrentMemoryContext);
-	aggstate = GetFakeAggState();
-	return CallAggfunction1(&flinfo, (Datum)target_state, (fmNodePtr *)aggstate);
-}
-
 PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
 	PGFunction refnaddr = NULL;
 	if (aggfnoid == InvalidOid) 
@@ -1096,6 +1014,7 @@ PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
 	switch (aggfnoid) 
 	{
 		case 2100:  // avg bigint
+			/* - 2100 pg_catalog.avg int8|bigint */
 			refnaddr = avg_p_int128;
 			break;
 		case 2101:  // avg integer
@@ -1103,24 +1022,20 @@ PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
 			refnaddr = avg_p_int64;
 			break;
 		case 2107:
-			/* Those aggregate functions have same type of aggstate -- PolyNumAggState.
-			 * - 2100 pg_catalog.avg int8|bigint
-			 * - 2107 pg_catalog.sum int8|bigint
-			 */
+			 /* - 2107 pg_catalog.sum int8|bigint */
 			refnaddr = sum_p_int128;
 			break;
 		case 2103:
+			/* - 2103 pg_catalog.avg numeric */
 			refnaddr = avg_p_numeric;
 			break;
 		case 2114:
-			/* Those aggregate functions have same type of aggstate -- NumericAggState.
-			 * - 2103 pg_catalog.avg numeric
-			 * - 2114 pg_catalog.sum numeric
-			 */
+			 /* - 2114 pg_catalog.sum numeric */
 			refnaddr = sum_p_numeric;
 			break;
 		case 2104:
 		case 2105:
+			/* - 2105 pg_catalog.avg float8 */
 			refnaddr = avg_p_float8;
 			break;
 		default:

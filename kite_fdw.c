@@ -126,7 +126,11 @@ typedef struct PgFdwScanState {
 
 	/* for remote query execution */
 	xrg_agg_t *agg;		 /* xrg_agg_t for aggregate */
+	xrg_agg_t *partial_agg;		 /* xrg_partial_agg_t for aggregate */
 	kite_request_t *req; /* kite connectino for the scan */
+	bool mpp_allsegment; /* mpp allsegment */
+	int fragid; /* fragment id */
+	int fragcnt; /* number of fragment in kite */
 
 	PgFdwConnState *conn_state; /* extra per-connection state */
 	unsigned int cursor_number; /* quasi-unique ID for my cursor */
@@ -153,7 +157,6 @@ typedef struct PgFdwScanState {
 	MemoryContext temp_cxt;  /* context for per-tuple temporary data */
 
 	int fetch_size; /* number of tuples per fetch */
-	int fragcnt;	/* number of fragment in kite */
 } PgFdwScanState;
 
 /*
@@ -910,12 +913,14 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 
 	if (table->exec_location == FTEXECLOCATION_ALL_SEGMENTS && Gp_role == GP_ROLE_EXECUTE) {
 		// parallel load here
-		int segid = GpIdentity.segindex;
-		int segcnt = getgpsegmentCount();
-
+		fsstate->fragid = GpIdentity.segindex;
+		fsstate->fragcnt = getgpsegmentCount();
+		fsstate->mpp_allsegment = true;
 	} else {
 		// single server
-		int segid = -1;
+		fsstate->mpp_allsegment = false;
+		fsstate->fragid = -1;
+		fsstate->fragcnt = 1;
 	}
 
 	/* KITE */
@@ -935,6 +940,22 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 	fsstate->fragcnt = intVal(list_nth(fsplan->fdw_private,
 		FdwScanPrivateFragCnt));
 	fsstate->fspec = (kite_filespec_t *)list_nth(fsplan->fdw_private, FdwScanPrivateFileSpec);
+
+	/* limit fragcnt to getgpsegmentCount() when mpp_allsegment = true */
+	if (fsstate->mpp_allsegment) {
+		if (fsstate->fragcnt < 0) {
+			fsstate->fragcnt = getgpsegmentCount();
+		}
+	       	if (fsstate->fragcnt > getgpsegmentCount()) {
+			fsstate->fragcnt = getgpsegmentCount();
+		}
+	} else {
+		if (fsstate->fragcnt < 0) {
+			elog(INFO, "fragcnt cannot be -1 when mpp_execute = 'all segment'. set fragcnt = 1.");
+			fsstate->fragcnt = 1;
+		}
+	}
+
 
 	/* Create contexts for batches of tuples and per-tuple temp workspace. */
 	fsstate->batch_cxt = AllocSetContextCreate(estate->es_query_cxt,
@@ -994,12 +1015,17 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 	/*
 	 * Prepare xrg_agg
 	 */
+	fsstate->agg = NULL;
+	fsstate->partial_agg = NULL;
 	if (fsstate->retrieved_aggfnoids) {
-		fsstate->agg = xrg_agg_init(fsstate->retrieved_attrs,
-			fsstate->retrieved_aggfnoids,
-			fsstate->retrieved_groupby_attrs);
-	} else {
-		fsstate->agg = NULL;
+		if (fsstate->mpp_allsegment) {
+			fsstate->partial_agg = NULL;
+
+		} else {
+			fsstate->agg = xrg_agg_init(fsstate->retrieved_attrs,
+				fsstate->retrieved_aggfnoids,
+				fsstate->retrieved_groupby_attrs);
+		}
 	}
 }
 
@@ -1662,8 +1688,20 @@ create_cursor(ForeignScanState *node) {
 		MemoryContextSwitchTo(oldcontext);
 	}
 
+	/* fragid is greater than fragcnt.  No need to fetch data on this QE */
+	if (fsstate->fragid >= fsstate->fragcnt) {
+		req->hdl = NULL;
+		fsstate->cursor_exists = true;
+		fsstate->tuples = NULL;
+		fsstate->num_tuples = 0;
+		fsstate->next_tuple = 0;
+		fsstate->fetch_ct_2 = 0;
+		fsstate->eof_reached = true;
+		return;
+	}
+
 	/* kite_submit */
-	req->hdl = kite_submit(req->host, fsstate->schema, fsstate->query, -1, fsstate->fragcnt, fsstate->fspec, errmsg, sizeof(errmsg));
+	req->hdl = kite_submit(req->host, fsstate->schema, fsstate->query, fsstate->fragid, fsstate->fragcnt, fsstate->fspec, errmsg, sizeof(errmsg));
 	if (!req->hdl) {
 		elog(ERROR, "kite_submit failed");
 		return;
@@ -1701,7 +1739,10 @@ fetch_more_data(ForeignScanState *node) {
 		int numrows;
 		int i;
 
-		if (fsstate->agg) {
+		if (fsstate->partial_agg) {
+
+
+		} else if (fsstate->agg) {
 			int batchsz = fsstate->fetch_size;
 
 			xrg_agg_fetch(fsstate->agg, hdl);
