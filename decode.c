@@ -5,6 +5,7 @@
 #include "utils/timestamp.h"
 #include "utils/numeric.h"
 #include "utils/fmgrprotos.h"
+#include "aggtrans.h"
 #include "numeric.hpp"
 
 #define POSTGRES_SUM_NUMERIC 1
@@ -246,12 +247,73 @@ int avg_decode(Oid aggfn, char *data, char flag, xrg_attr_t *attr, int atttypmod
 	return 0;
 }
 
-int agg_p_decode1(Oid aggfn, char *p1, xrg_attr_t *attr1, int atttypmod, Datum *pg_datum, bool *og_isnull) {
+int agg_p_decode1(Oid aggfnoid, char *p, xrg_attr_t *attr, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+
+	Datum datum;
+	bool isnull = false;
+	if (var_decode(p, 0, attr, atttypmod, &datum, &isnull)) {
+		return 1;
+	}
+
+	PGFunction fn = GetTranscodingFnFromOid(aggfnoid);
+	if (fn) {
+		FmgrInfo flinfo;
+		memset(&flinfo, 0, sizeof(FmgrInfo));
+		flinfo.fn_addr = fn;
+		flinfo.fn_nargs = 1;
+		flinfo.fn_strict = true;
+
+		LOCAL_FCINFO(fcinfo, 1);
+		InitFunctionCallInfoData(*fcinfo, &flinfo, 1, InvalidOid, 0, 0);
+		fcinfo->args[0].value = datum;
+		fcinfo->args[0].isnull = false;
+
+		*pg_isnull = false;
+		*pg_datum = FunctionCallInvoke(fcinfo);
+	} else {
+		*pg_isnull = false;
+		*pg_datum = datum;
+	}
 
 	return 0;
 }
 
-int agg_p_decode2(Oid aggfn, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_t *attr2, int atttypmod, Datum *pg_datum, bool *og_isnull) {
+int agg_p_decode2(Oid aggfnoid, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_t *attr2, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
 
+	Datum sum;
+	Datum count;
+	bool isnull;
+
+	/* sum */
+	if (var_decode(p1, 0, attr1, atttypmod, &sum, &isnull)) {
+		return 1;
+	}
+
+	/* count */
+	if (var_decode(p2, 0, attr2, 0, &count, &isnull)) {
+		return 1;
+	}
+
+	PGFunction fn = GetTranscodingFnFromOid(aggfnoid);
+	if (!fn) {
+		elog(ERROR, "agg_p_decode2: not aggfn found");
+		return 1;
+	}
+
+	FmgrInfo flinfo;
+	memset(&flinfo, 0, sizeof(FmgrInfo));
+	flinfo.fn_addr = fn;
+	flinfo.fn_nargs = 2;
+	flinfo.fn_strict = true;
+
+	LOCAL_FCINFO(fcinfo, 2);
+	InitFunctionCallInfoData(*fcinfo, &flinfo, 2, InvalidOid, 0, 0);
+	fcinfo->args[0].value = count;
+	fcinfo->args[0].isnull = false;
+	fcinfo->args[1].value = sum;
+	fcinfo->args[1].isnull = false;
+
+	*pg_isnull = false;
+	*pg_datum = FunctionCallInvoke(fcinfo);
 	return 0;
 }
