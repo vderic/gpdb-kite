@@ -135,7 +135,6 @@ xrg_agg_p_t *xrg_agg_p_init(List *retrieved_attrs, List *aggfnoids, List *groupb
 	Assert(agg);
 
 	agg->reached_eof = false;
-	agg->attr = 0;
 	agg->retrieved_attrs = retrieved_attrs;
 	agg->aggfnoids = aggfnoids;
 	agg->groupby_attrs = groupby_attrs;
@@ -149,9 +148,6 @@ xrg_agg_p_t *xrg_agg_p_init(List *retrieved_attrs, List *aggfnoids, List *groupb
 
 void xrg_agg_p_destroy(xrg_agg_p_t *agg) {
 	if (agg) {
-		if (agg->attr) {
-			free(agg->attr);
-		}
 		if (agg->tlist) {
 			free(agg->tlist);
 		}
@@ -162,8 +158,46 @@ void xrg_agg_p_destroy(xrg_agg_p_t *agg) {
 
 
 int xrg_agg_p_get_next(xrg_agg_p_t *agg, xrg_iter_t *iter, AttInMetadata *attinmeta, Datum *datums, bool *flags, int n) {
+	ListCell *lc;
+	int ret = 0;
 
-	return 1;
+	if (iter->nvec != agg->ncol) {
+		elog(ERROR, "xrg_agg_p_get_next: number of columns returned from kite not match (%d != %d)", 
+				agg->ncol, iter->nvec);
+		return 1;
+	}
+
+	for (int i = 0, j = 0 ; i < agg->ntlist && j < iter->nvec ; i++) {
+		agg_p_target_t *tgt = &agg->tlist[i];
+		int k = tgt->pgattr;
+		int nkiteattr = list_length(tgt->attrs);
+		Oid aggfn = tgt->aggfn;
+		int typmod = (attinmeta) ? attinmeta->atttypmods[k-1] : 0;
+
+		if (nkiteattr == 1) {
+			char *p = iter->value[j];
+			xrg_attr_t *attr = &iter->attr[j];
+			j++;
+
+			agg_p_decode1(aggfn, p, attr, typmod, &datums[k-1], &flags[k-1]);
+
+		} else if (nkiteattr == 2) {
+			char *p1, *p2;
+			xrg_attr_t *attr1, *attr2;
+			p1 = iter->value[j];
+			attr1 = &iter->attr[j];
+			j++;
+			p2 = iter->value[j];
+			attr2 = &iter->attr[j];
+			j++;
+			agg_p_decode2(aggfn, p1, attr1, p2, attr2, typmod, &datums[k-1], &flags[k-1]);
+		} else {
+			elog(ERROR, "xrg_agg_p_get_next: aggregate function won't have more than 2 columns");
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 

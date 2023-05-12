@@ -25,7 +25,6 @@ struct xrg_agg_p_t {
 	List *aggfnoids;
 	List *retrieved_attrs;
 
-	xrg_attr_t *attr;
 	bool reached_eof;
 
 	int ntlist;
