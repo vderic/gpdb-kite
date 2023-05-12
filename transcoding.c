@@ -42,6 +42,8 @@
 #include "utils/numeric.h"
 #include "nodes/execnodes.h"
 
+static AggState *g_aggstate = NULL;
+
 /* Start of dependencies of internal struct from float8 */
 typedef struct FloatAvgAggState
 {
@@ -892,9 +894,10 @@ typedef struct Int8TransTypeData
 /* Make fake AggState to call agg functions */
 static AggState *GetFakeAggState()
 {
-	AggState *aggstate = NULL;
-	aggstate = makeNode(AggState);
-	return aggstate;
+	if (! g_aggstate) {
+		g_aggstate = makeNode(AggState);
+	}
+	return g_aggstate;
 }
 
 static Datum CallAggfunction1(FmgrInfo *flinfo, Datum arg1, fmNodePtr *context)
