@@ -29,52 +29,6 @@ static int get_ncol_from_aggfnoids(List *aggfnoids) {
 	return i;
 }
 
-#if 0
-static void finalize(void *context, const void *rec, void *data, AttInMetadata *attinmeta,
-       	Datum *datums, bool *flags, int ndatum) {
-	xrg_agg_p_t *agg = (xrg_agg_p_t *) context;
-	void **translist = (void  **)data;
-	const char *p = rec;
-	xrg_attr_t *attr = agg->attr;
-
-	for (int i = 0 ; i < agg->ntlist ; i++) {
-		agg_p_target_t *tgt = &agg->tlist[i];
-		int k = tgt->pgattr;
-		void *transdata = translist[i];
-		Oid aggfn = tgt->aggfn;
-		int typmod = (attinmeta) ? attinmeta->atttypmods[k-1] : 0;
-
-		// datums[k] =  value[i]
-		if (transdata) {
-			int top = list_length(tgt->attrs);
-			// finalize_aggregate();
-			if (aggfnoid_is_avg(aggfn)) {
-				//finalize_avg();
-				avg_decode(aggfn, transdata, 0, attr, typmod, &datums[k-1], &flags[k-1]);
-			} else {
-				var_decode(transdata, 0, attr, typmod, &datums[k-1], &flags[k-1]);
-			}
-
-			for (int j = 0 ; j < top ; j++) {
-				p = column_next(attr, p);
-				attr++;
-			}
-		} else {
-			// MUST advance the next pointer first because bytea size header will be altered to match postgres
-			const char *p1 = p;
-			xrg_attr_t *attr1 = attr;
-			p = column_next(attr++, p);
-			var_decode((char *) p1, 0, attr1, typmod, &datums[k-1], &flags[k-1]);
-		}
-	}
-
-	if (translist) {
-		free(translist);
-	}
-}
-
-#endif
-
 static void build_tlist(xrg_agg_p_t *agg) {
 
 	int i = 0, j=0;
