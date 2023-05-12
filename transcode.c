@@ -1,6 +1,13 @@
 #include "pg_aggstate.c"
 #include "transcode.h"
 
+#define INIT_AGGSTATE(aggstate) \
+{ \
+	Node *node = (Node *) &aggstate; \
+	memset(&aggstate, 0, sizeof(AggState)); \
+	node->type = T_AggState; \
+}
+
 /* KITE */
 /* int */
 static Datum agg_p_int128(int64 count, int128 sum) {
@@ -20,7 +27,7 @@ static Datum agg_p_int128(int64 count, int128 sum) {
 	memset(&flinfo, 0, sizeof(FmgrInfo));
 	fmgr_info_cxt(fmgr_internal_function("int8_avg_serialize"), &flinfo, CurrentMemoryContext);
 
-	INIT_AGGSTATE(&aggstate);
+	INIT_AGGSTATE(aggstate);
 	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)&aggstate);
 }
 
@@ -63,7 +70,7 @@ static Datum agg_p_numeric(int64 count, Numeric sum) {
 	memset(&flinfo, 0, sizeof(FmgrInfo));
 	fmgr_info_cxt(fmgr_internal_function("numeric_avg_serialize"), &flinfo, CurrentMemoryContext);
 
-	INIT_AGGSTATE(&aggstate);
+	INIT_AGGSTATE(aggstate);
 	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)&aggstate);
 }
 

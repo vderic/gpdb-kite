@@ -42,13 +42,6 @@
 #include "nodes/execnodes.h"
 
 
-#define INIT_AGGSTATE(aggstate) \
-{ \
-	Node *node = (Node *) aggstate; \
-	memset(aggstate, 0, sizeof(AggState)); \
-	node->type = T_AggState; \
-} 
-
 /* Start of dependencies of internal struct from float8 */
 typedef struct FloatAvgAggState
 {
