@@ -4,16 +4,6 @@
 
 extern bool aggfnoid_is_avg(int aggfnoid);
 
-static const char *column_next(xrg_attr_t *attr, const char *p) {
-	if (attr->itemsz > 0) {
-		p +=  attr->itemsz;
-	} else {
-		p += xrg_bytea_len(p) + 4;
-	}
-
-	return p;
-}
-
 static int get_ncol_from_aggfnoids(List *aggfnoids) {
 	ListCell *lc;
 	int i = 0;

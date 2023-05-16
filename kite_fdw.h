@@ -3,28 +3,32 @@
  * postgres_fdw.h
  *		  Foreign-data wrapper for remote PostgreSQL servers
  *
- * Portions Copyright (c) 2012-2022, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2012-2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/postgres_fdw/postgres_fdw.h
  *
  *-------------------------------------------------------------------------
  */
-#ifndef POSTGRES_FDW_H
-#define POSTGRES_FDW_H
+#ifndef KITE_FDW_H
+#define KITE_FDW_H
 
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
-#include "libpq-fe.h"
-#include "nodes/execnodes.h"
 #include "nodes/pathnodes.h"
 #include "utils/relcache.h"
+
+#include "libpq-fe.h"
+
 #include "kitesdk.h"
 
 typedef struct kite_request_t {
 	char *host;
 	kite_handle_t *hdl;
 } kite_request_t;
+
+extern void filespec_serialize(kite_filespec_t *fspec, StringInfo s);
+extern kite_filespec_t *filespec_deserialize(char *src);
 
 /*
  * FDW-specific planner information kept in RelOptInfo.fdw_private for a
@@ -84,8 +88,7 @@ typedef struct PgFdwRelationInfo
 	bool		use_remote_estimate;
 	Cost		fdw_startup_cost;
 	Cost		fdw_tuple_cost;
-	List	   *shippable_extensions;	/* OIDs of shippable extensions */
-	bool		async_capable;
+	List	   *shippable_extensions;	/* OIDs of whitelisted extensions */
 
 	/* Cached catalog information. */
 	ForeignTable *table;
@@ -93,7 +96,6 @@ typedef struct PgFdwRelationInfo
 	UserMapping *user;			/* only set in use_remote_estimate mode */
 
 	int			fetch_size;		/* fetch size for this remote table */
-
 	int                     fragcnt; /* number of fragment in kite */
 	char            *fmt;  /* source format such as csv, parquet */
 	char            csv_delim; /* csv delimiter */
@@ -102,16 +104,12 @@ typedef struct PgFdwRelationInfo
 	bool            csv_header; /* csv header boolean */
 	char            *csv_nullstr; /* csv NULL string */
 
-
 	/*
-	 * Name of the relation, for use while EXPLAINing ForeignScan.  It is used
-	 * for join and upper relations but is set for all relations.  For a base
-	 * relation, this is really just the RT index as a string; we convert that
-	 * while producing EXPLAIN output.  For join and upper relations, the name
-	 * indicates which base foreign tables are included and the join type or
-	 * aggregation type used.
+	 * Name of the relation while EXPLAINing ForeignScan. It is used for join
+	 * relations but is set for all relations. For join relation, the name
+	 * indicates which foreign tables are being joined and the join type used.
 	 */
-	char	   *relation_name;
+	StringInfo	relation_name;
 
 	/* Join information */
 	RelOptInfo *outerrel;
@@ -141,33 +139,18 @@ typedef struct PgFdwRelationInfo
 	int			relation_index;
 } PgFdwRelationInfo;
 
-/*
- * Extra control information relating to a connection.
- */
-typedef struct PgFdwConnState
-{
-} PgFdwConnState;
-
 /* in postgres_fdw.c */
 extern int	set_transmission_modes(void);
 extern void reset_transmission_modes(int nestlevel);
 
 /* in connection.c */
-#ifdef KITE_CONNECT
-extern kite_request_t *GetConnection(UserMapping *user, bool will_prep_stmt,
-							 PgFdwConnState **state);
+extern kite_request_t *GetConnection(UserMapping *user, bool will_prep_stmt);
 extern void ReleaseConnection(kite_request_t *req);
-#else
-extern PGconn *GetConnection(UserMapping *user, bool will_prep_stmt,
-							 PgFdwConnState **state);
-extern void ReleaseConnection(PGconn *conn);
-#endif
+
 extern unsigned int GetCursorNumber(PGconn *conn);
 extern unsigned int GetPrepStmtNumber(PGconn *conn);
-extern void do_sql_command(PGconn *conn, const char *sql);
 extern PGresult *pgfdw_get_result(PGconn *conn, const char *query);
-extern PGresult *pgfdw_exec_query(PGconn *conn, const char *query,
-								  PgFdwConnState *state);
+extern PGresult *pgfdw_exec_query(PGconn *conn, const char *query);
 extern void pgfdw_report_error(int elevel, PGresult *res, PGconn *conn,
 							   bool clear, const char *sql);
 
@@ -177,8 +160,6 @@ extern int	ExtractConnectionOptions(List *defelems,
 									 const char **values);
 extern List *ExtractExtensionList(const char *extensionsString,
 								  bool warnOnMissing);
-extern char *process_pgfdw_appname(const char *appname);
-extern char *pgfdw_application_name;
 
 /* in deparse.c */
 extern void classifyConditions(PlannerInfo *root,
@@ -199,11 +180,7 @@ extern void deparseInsertSql(StringInfo buf, RangeTblEntry *rte,
 							 Index rtindex, Relation rel,
 							 List *targetAttrs, bool doNothing,
 							 List *withCheckOptionList, List *returningList,
-							 List **retrieved_attrs, int *values_end_len);
-extern void rebuildInsertSql(StringInfo buf, Relation rel,
-							 char *orig_query, List *target_attrs,
-							 int values_end_len, int num_params,
-							 int num_rows);
+							 List **retrieved_attrs);
 extern void deparseUpdateSql(StringInfo buf, RangeTblEntry *rte,
 							 Index rtindex, Relation rel,
 							 List *targetAttrs,
@@ -230,14 +207,8 @@ extern void deparseDirectDeleteSql(StringInfo buf, PlannerInfo *root,
 								   List *returningList,
 								   List **retrieved_attrs);
 extern void deparseAnalyzeSizeSql(StringInfo buf, Relation rel, List **retrieved_attrs, List **aggfnoids);
-extern void deparseAnalyzeSql(StringInfo buf, Relation rel,
-							  List **retrieved_attrs,
-							  int targrows,
-							  double totalrows);
-extern void deparseTruncateSql(StringInfo buf,
-							   List *rels,
-							   DropBehavior behavior,
-							   bool restart_seqs);
+extern void deparseAnalyzeSql(StringInfo buf, Relation rel, List **retrieved_attrs, int targrows, double totalrows);
+
 extern void deparseStringLiteral(StringInfo buf, const char *val);
 extern EquivalenceMember *find_em_for_rel(PlannerInfo *root,
 										  EquivalenceClass *ec,
@@ -254,6 +225,7 @@ extern void deparseSelectStmtForRel(StringInfo buf, PlannerInfo *root,
 									List **retrieved_attrs, List **params_list,
 									List **retrieved_aggfnoids,
 									List **retrieved_groupby_attrs);
+
 extern const char *get_jointype_name(JoinType jointype);
 
 extern bool aggfnoid_is_avg(int aggfnoid);
@@ -262,4 +234,5 @@ extern bool aggfnoid_is_avg(int aggfnoid);
 extern bool is_builtin(Oid objectId);
 extern bool is_shippable(Oid objectId, Oid classId, PgFdwRelationInfo *fpinfo);
 
+extern PGFunction GetTranscodingFnFromOid(Oid aggfnoid);
 #endif							/* POSTGRES_FDW_H */

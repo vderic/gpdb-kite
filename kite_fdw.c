@@ -1,9 +1,9 @@
 /*-------------------------------------------------------------------------
  *
  * kite_fdw.c
- *		  Foreign-data wrapper for remote Kite servers
+ *		  Foreign-data wrapper for remote PostgreSQL servers
  *
- * Portions Copyright (c) 2012-2022, Vitessedata Inc.
+ * Portions Copyright (c) 2012-2019, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/kite_fdw/kite_fdw.c
@@ -12,7 +12,7 @@
  */
 #include "postgres.h"
 
-#include <limits.h>
+#include "kite_fdw.h"
 
 #include "access/htup_details.h"
 #include "access/sysattr.h"
@@ -27,19 +27,15 @@
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
-#include "optimizer/appendinfo.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
-#include "optimizer/prep.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
-#include "kite_fdw.h"
-#include "storage/latch.h"
 #include "utils/builtins.h"
 #include "utils/float.h"
 #include "utils/guc.h"
@@ -59,16 +55,17 @@
 #include "agg.h"
 #include "partial_agg.h"
 
+
 /* source-code-compatibility hacks for pull_varnos() API change */
 #define make_restrictinfo(a,b,c,d,e,f,g,h,i) make_restrictinfo_new(a,b,c,d,e,f,g,h,i)
 
 PG_MODULE_MAGIC;
 
 /* Default CPU cost to start up a foreign query. */
-#define DEFAULT_FDW_STARTUP_COST 100.0
+#define DEFAULT_FDW_STARTUP_COST	100.0
 
 /* Default CPU cost to process 1 row (above and beyond cpu_tuple_cost). */
-#define DEFAULT_FDW_TUPLE_COST 0.01
+#define DEFAULT_FDW_TUPLE_COST		0.01
 
 /* If no remote estimates, assume a sort costs 20% extra */
 #define DEFAULT_FDW_SORT_MULTIPLIER 1.2
@@ -80,7 +77,8 @@ PG_MODULE_MAGIC;
  * can be fetched with list_nth().  For example, to get the SELECT statement:
  *		sql = strVal(list_nth(fdw_private, FdwScanPrivateSelectSql));
  */
-enum FdwScanPrivateIndex {
+enum FdwScanPrivateIndex
+{
 	/* Relation Schema (as a String node) */
 	FdwScanPrivateSchema,
 	/* SQL statement to execute remotely (as a String node) */
@@ -105,17 +103,17 @@ enum FdwScanPrivateIndex {
 
 	/* Integer list of groupby index in Kite by the SELECT */
 	FdwScanPrivateRetrievedGroupByAttrs
-
 };
 
 /*
  * Execution state of a foreign scan using kite_fdw.
  */
-typedef struct PgFdwScanState {
-	Relation rel;			  /* relcache entry for the foreign table. NULL
+typedef struct PgFdwScanState
+{
+	Relation	rel;			/* relcache entry for the foreign table. NULL
 								 * for a foreign join scan. */
-	TupleDesc tupdesc;		  /* tuple descriptor of scan */
-	AttInMetadata *attinmeta; /* attribute datatype conversion metadata */
+	TupleDesc	tupdesc;		/* tuple descriptor of scan */
+	AttInMetadata *attinmeta;	/* attribute datatype conversion metadata */
 
 	/* extracted fdw_private data */
 	kite_filespec_t *fspec;                    /* filespec of the table */
@@ -127,60 +125,58 @@ typedef struct PgFdwScanState {
 
 	/* for remote query execution */
 	xrg_agg_t *agg;		 /* xrg_agg_t for aggregate */
-	xrg_agg_p_t *partial_agg;		 /* xrg_partial_agg_t for aggregate */
+	xrg_agg_p_t *partial_agg; /* xrg_agg_p_t for partial aggregate */
 	kite_request_t *req; /* kite connectino for the scan */
 	bool mpp_allsegment; /* mpp allsegment */
 	int fragid; /* fragment id */
 	int fragcnt; /* number of fragment in kite */
 
-	PgFdwConnState *conn_state; /* extra per-connection state */
+	/* for remote query execution */
 	unsigned int cursor_number; /* quasi-unique ID for my cursor */
-	bool cursor_exists;			/* have we created the cursor? */
-	int numParams;				/* number of parameters passed to query */
-	FmgrInfo *param_flinfo;		/* output conversion functions for them */
-	List *param_exprs;			/* executable expressions for param values */
-	const char **param_values;  /* textual values of query parameters */
+	bool		cursor_exists;	/* have we created the cursor? */
+	int			numParams;		/* number of parameters passed to query */
+	FmgrInfo   *param_flinfo;	/* output conversion functions for them */
+	List	   *param_exprs;	/* executable expressions for param values */
+	const char **param_values;	/* textual values of query parameters */
 
 	/* for storing result tuples */
-	HeapTuple *tuples; /* array of currently-retrieved tuples */
-	int num_tuples;	/* # of tuples in array */
-	int next_tuple;	/* index of next one to return */
+	HeapTuple  *tuples;			/* array of currently-retrieved tuples */
+	int			num_tuples;		/* # of tuples in array */
+	int			next_tuple;		/* index of next one to return */
 
 	/* batch-level state, for optimizing rewinds and avoiding useless fetch */
-	int fetch_ct_2;   /* Min(# of fetches done, 2) */
-	bool eof_reached; /* true if last fetch reached EOF */
-
-	/* for asynchronous execution */
-	bool async_capable; /* engage asynchronous-capable logic? */
+	int			fetch_ct_2;		/* Min(# of fetches done, 2) */
+	bool		eof_reached;	/* true if last fetch reached EOF */
 
 	/* working memory contexts */
-	MemoryContext batch_cxt; /* context holding current batch of tuples */
-	MemoryContext temp_cxt;  /* context for per-tuple temporary data */
+	MemoryContext batch_cxt;	/* context holding current batch of tuples */
+	MemoryContext temp_cxt;		/* context for per-tuple temporary data */
 
-	int fetch_size; /* number of tuples per fetch */
+	int			fetch_size;		/* number of tuples per fetch */
 } PgFdwScanState;
 
 /*
  * Workspace for analyzing a foreign table.
  */
-typedef struct PgFdwAnalyzeState {
-	Relation rel;			  /* relcache entry for the foreign table */
-	AttInMetadata *attinmeta; /* attribute datatype conversion metadata */
-	List *retrieved_attrs;	/* attr numbers retrieved by query */
+typedef struct PgFdwAnalyzeState
+{
+	Relation	rel;			/* relcache entry for the foreign table */
+	AttInMetadata *attinmeta;	/* attribute datatype conversion metadata */
+	List	   *retrieved_attrs;	/* attr numbers retrieved by query */
 
 	/* collected sample rows */
-	HeapTuple *rows; /* array of size targrows */
-	int targrows;	/* target # of sample rows */
-	int numrows;	 /* # of sample rows collected */
+	HeapTuple  *rows;			/* array of size targrows */
+	int			targrows;		/* target # of sample rows */
+	int			numrows;		/* # of sample rows collected */
 
 	/* for random sampling */
-	double samplerows;		   /* # of rows fetched */
-	double rowstoskip;		   /* # of rows to skip before next sample */
-	ReservoirStateData rstate; /* state for reservoir sampling */
+	double		samplerows;		/* # of rows fetched */
+	double		rowstoskip;		/* # of rows to skip before next sample */
+	ReservoirStateData rstate;	/* state for reservoir sampling */
 
 	/* working memory contexts */
-	MemoryContext anl_cxt;  /* context for per-analyze lifespan data */
-	MemoryContext temp_cxt; /* context for per-tuple temporary data */
+	MemoryContext anl_cxt;		/* context for per-analyze lifespan data */
+	MemoryContext temp_cxt;		/* context for per-tuple temporary data */
 } PgFdwAnalyzeState;
 
 /*
@@ -190,10 +186,11 @@ typedef struct PgFdwAnalyzeState {
  * 1) Boolean flag showing if the remote query has the final sort
  * 2) Boolean flag showing if the remote query has the LIMIT clause
  */
-enum FdwPathPrivateIndex {
-	/* has-final-sort flag (as a Boolean node) */
+enum FdwPathPrivateIndex
+{
+	/* has-final-sort flag (as an integer Value node) */
 	FdwPathPrivateHasFinalSort,
-	/* has-limit flag (as a Boolean node) */
+	/* has-limit flag (as an integer Value node) */
 	FdwPathPrivateHasLimit
 };
 
@@ -201,21 +198,29 @@ enum FdwPathPrivateIndex {
 typedef struct
 {
 	PathTarget *target;
-	bool has_final_sort;
-	bool has_limit;
-	double limit_tuples;
-	int64 count_est;
-	int64 offset_est;
+	bool		has_final_sort;
+	bool		has_limit;
+	double		limit_tuples;
+	int64		count_est;
+	int64		offset_est;
 } PgFdwPathExtraData;
 
 /*
  * Identify the attribute where data conversion fails.
  */
-typedef struct ConversionLocation {
-	AttrNumber cur_attno;	  /* attribute number being processed, or 0 */
-	Relation rel;			   /* foreign table being processed, or NULL */
-	ForeignScanState *fsstate; /* plan node being processed, or NULL */
+typedef struct ConversionLocation
+{
+	AttrNumber	cur_attno;		/* attribute number being processed, or 0 */
+	Relation	rel;			/* foreign table being processed, or NULL */
+	ForeignScanState *fsstate;	/* plan node being processed, or NULL */
 } ConversionLocation;
+
+/* Callback argument for ec_member_matches_foreign */
+typedef struct
+{
+	Expr	   *current;		/* current expr, or NULL if not yet found */
+	List	   *already_used;	/* expressions already dealt with */
+} ec_member_foreign_arg;
 
 /*
  * SQL functions
@@ -226,62 +231,62 @@ PG_FUNCTION_INFO_V1(kite_fdw_handler);
  * FDW callback routines
  */
 static void kiteGetForeignRelSize(PlannerInfo *root,
-	RelOptInfo *baserel,
-	Oid foreigntableid);
+									  RelOptInfo *baserel,
+									  Oid foreigntableid);
 static void kiteGetForeignPaths(PlannerInfo *root,
-	RelOptInfo *baserel,
-	Oid foreigntableid);
+									RelOptInfo *baserel,
+									Oid foreigntableid);
 static ForeignScan *kiteGetForeignPlan(PlannerInfo *root,
-	RelOptInfo *foreignrel,
-	Oid foreigntableid,
-	ForeignPath *best_path,
-	List *tlist,
-	List *scan_clauses,
-	Plan *outer_plan);
+										   RelOptInfo *foreignrel,
+										   Oid foreigntableid,
+										   ForeignPath *best_path,
+										   List *tlist,
+										   List *scan_clauses,
+										   Plan *outer_plan);
 static void kiteBeginForeignScan(ForeignScanState *node, int eflags);
 static TupleTableSlot *kiteIterateForeignScan(ForeignScanState *node);
 static void kiteReScanForeignScan(ForeignScanState *node);
 static void kiteEndForeignScan(ForeignScanState *node);
-
-static void kiteGetForeignUpperPaths(PlannerInfo *root,
-	UpperRelationKind stage,
-	RelOptInfo *input_rel,
-	RelOptInfo *output_rel,
-	void *extra);
-
+static void kiteExplainForeignScan(ForeignScanState *node,
+									   ExplainState *es);
 static bool kiteAnalyzeForeignTable(Relation relation,
-	AcquireSampleRowsFunc *func,
-	BlockNumber *totalpages);
-
+										AcquireSampleRowsFunc *func,
+										BlockNumber *totalpages);
+static void kiteGetForeignUpperPaths(PlannerInfo *root,
+										 UpperRelationKind stage,
+										 RelOptInfo *input_rel,
+										 RelOptInfo *output_rel,
+										 void *extra);
 /*
  * Helper functions
  */
 static void estimate_path_cost_size(PlannerInfo *root,
-	RelOptInfo *foreignrel,
-	List *param_join_conds,
-	List *pathkeys,
-	PgFdwPathExtraData *fpextra,
-	double *p_rows, int *p_width,
-	Cost *p_startup_cost, Cost *p_total_cost);
+									RelOptInfo *foreignrel,
+									List *param_join_conds,
+									List *pathkeys,
+									PgFdwPathExtraData *fpextra,
+									double *p_rows, int *p_width,
+									Cost *p_startup_cost, Cost *p_total_cost);
 static void adjust_foreign_grouping_path_cost(PlannerInfo *root,
-	List *pathkeys,
-	double retrieved_rows,
-	double width,
-	double limit_tuples,
-	Cost *p_startup_cost,
-	Cost *p_run_cost);
+											  List *pathkeys,
+											  double retrieved_rows,
+											  double width,
+											  double limit_tuples,
+											  Cost *p_startup_cost,
+											  Cost *p_run_cost);
+static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
+									  EquivalenceClass *ec, EquivalenceMember *em,
+									  void *arg);
 static void create_cursor(ForeignScanState *node);
 static void fetch_more_data(ForeignScanState *node);
-static void prepare_query_params(PlanState *node,
-	List *fdw_exprs,
-	int numParams,
-	FmgrInfo **param_flinfo,
-	List **param_exprs,
-	const char ***param_values);
 static void process_query_params(ExprContext *econtext,
-	FmgrInfo *param_flinfo,
-	List *param_exprs,
-	const char **param_values);
+								 FmgrInfo *param_flinfo,
+								 List *param_exprs,
+								 const char **param_values);
+static int	kiteAcquireSampleRowsFunc(Relation relation, int elevel,
+										  HeapTuple *rows, int targrows,
+										  double *totalrows,
+										  double *totaldeadrows);
 /* KITE */
 static HeapTuple make_tuple_from_agg(xrg_agg_t *agg,
 	int row,
@@ -308,35 +313,41 @@ static HeapTuple make_tuple_from_result_row(xrg_iter_t *iter,
 	ForeignScanState *fsstate,
 	MemoryContext temp_context);
 
+static bool kite_get_relation_stats(PgFdwRelationInfo *fpinfo, Relation relation, kite_filespec_t *fspec,
+                BlockNumber *totalpages, double *totalrows);
+
 /* END KITE */
 
 static void conversion_error_callback(void *arg);
 static bool foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
-	Node *havingQual);
+								Node *havingQual);
+static List *get_useful_pathkeys_for_relation(PlannerInfo *root,
+											  RelOptInfo *rel);
+static List *get_useful_ecs_for_relation(PlannerInfo *root, RelOptInfo *rel);
+static void add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
+											Path *epq_path);
 static void add_foreign_grouping_paths(PlannerInfo *root,
-	RelOptInfo *input_rel,
-	RelOptInfo *grouped_rel,
-	GroupPathExtraData *extra);
+									   RelOptInfo *input_rel,
+									   RelOptInfo *grouped_rel,
+									   GroupPathExtraData *extra);
 static void add_foreign_final_paths(PlannerInfo *root,
-	RelOptInfo *input_rel,
-	RelOptInfo *final_rel,
-	FinalPathExtraData *extra);
+									RelOptInfo *input_rel,
+									RelOptInfo *final_rel,
+									FinalPathExtraData *extra);
 static void apply_server_options(PgFdwRelationInfo *fpinfo);
 static void apply_table_options(PgFdwRelationInfo *fpinfo);
 static void merge_fdw_options(PgFdwRelationInfo *fpinfo,
-	const PgFdwRelationInfo *fpinfo_o,
-	const PgFdwRelationInfo *fpinfo_i);
+							  const PgFdwRelationInfo *fpinfo_o,
+							  const PgFdwRelationInfo *fpinfo_i);
 
-static int kiteAcquireSampleRowsFunc(Relation relation, int elevel,
-	HeapTuple *rows, int targrows,
-	double *totalrows,
-	double *totaldeadrows);
 
 /*
  * Foreign-data wrapper handler function: return a struct with pointers
  * to my callback routines.
  */
-Datum kite_fdw_handler(PG_FUNCTION_ARGS) {
+Datum
+kite_fdw_handler(PG_FUNCTION_ARGS)
+{
 	FdwRoutine *routine = makeNode(FdwRoutine);
 
 	/* Functions for scanning foreign tables */
@@ -348,11 +359,17 @@ Datum kite_fdw_handler(PG_FUNCTION_ARGS) {
 	routine->ReScanForeignScan = kiteReScanForeignScan;
 	routine->EndForeignScan = kiteEndForeignScan;
 
+	/* Function for EvalPlanQual rechecks */
+	// routine->RecheckForeignScan = kiteRecheckForeignScan;
+	
+	/* Support functions for EXPLAIN */
+	routine->ExplainForeignScan = kiteExplainForeignScan;
+
+	/* Support functions for ANALYZE */
+	routine->AnalyzeForeignTable = kiteAnalyzeForeignTable;
+
 	/* Support functions for upper relation push-down */
 	routine->GetForeignUpperPaths = kiteGetForeignUpperPaths;
-
-	/* Support functions for analyze foreign tables */
-	routine->AnalyzeForeignTable = kiteAnalyzeForeignTable;
 
 	PG_RETURN_POINTER(routine);
 }
@@ -366,18 +383,22 @@ Datum kite_fdw_handler(PG_FUNCTION_ARGS) {
  */
 static void
 kiteGetForeignRelSize(PlannerInfo *root,
-	RelOptInfo *baserel,
-	Oid foreigntableid) {
+						  RelOptInfo *baserel,
+						  Oid foreigntableid)
+{
 	PgFdwRelationInfo *fpinfo;
-	ListCell *lc;
+	ListCell   *lc;
 	RangeTblEntry *rte = planner_rt_fetch(baserel->relid, root);
+	const char *namespace;
+	const char *relname;
+	const char *refname;
 
 	/*
 	 * We use PgFdwRelationInfo to pass various information to subsequent
 	 * functions.
 	 */
-	fpinfo = (PgFdwRelationInfo *)palloc0(sizeof(PgFdwRelationInfo));
-	baserel->fdw_private = (void *)fpinfo;
+	fpinfo = (PgFdwRelationInfo *) palloc0(sizeof(PgFdwRelationInfo));
+	baserel->fdw_private = (void *) fpinfo;
 
 	/* Base foreign tables need to be pushed down always. */
 	fpinfo->pushdown_safe = true;
@@ -388,15 +409,14 @@ kiteGetForeignRelSize(PlannerInfo *root,
 
 	/*
 	 * Extract user-settable option values.  Note that per-table settings of
-	 * use_remote_estimate, fetch_size and async_capable override per-server
-	 * settings of them, respectively.
+	 * use_remote_estimate and fetch_size override per-server settings of
+	 * them, respectively.
 	 */
 	fpinfo->use_remote_estimate = false;
 	fpinfo->fdw_startup_cost = DEFAULT_FDW_STARTUP_COST;
 	fpinfo->fdw_tuple_cost = DEFAULT_FDW_TUPLE_COST;
 	fpinfo->shippable_extensions = NIL;
 	fpinfo->fetch_size = 100;
-	fpinfo->async_capable = false;
 	fpinfo->fragcnt = 1;
 	fpinfo->csv_delim = ',';
 	fpinfo->csv_quote = '"';
@@ -413,11 +433,13 @@ kiteGetForeignRelSize(PlannerInfo *root,
 	 * should match what ExecCheckRTEPerms() does.  If we fail due to lack of
 	 * permissions, the query would have failed at runtime anyway.
 	 */
-	if (fpinfo->use_remote_estimate) {
-		Oid userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
+	if (fpinfo->use_remote_estimate)
+	{
+		Oid			userid = rte->checkAsUser ? rte->checkAsUser : GetUserId();
 
 		fpinfo->user = GetUserMapping(userid, fpinfo->server->serverid);
-	} else
+	}
+	else
 		fpinfo->user = NULL;
 
 	/*
@@ -425,7 +447,7 @@ kiteGetForeignRelSize(PlannerInfo *root,
 	 * server and which can't.
 	 */
 	classifyConditions(root, baserel, baserel->baserestrictinfo,
-		&fpinfo->remote_conds, &fpinfo->local_conds);
+					   &fpinfo->remote_conds, &fpinfo->local_conds);
 
 	/*
 	 * Identify which attributes will need to be retrieved from the remote
@@ -435,15 +457,15 @@ kiteGetForeignRelSize(PlannerInfo *root,
 	 * sent to the remote and thus we wouldn't really need to retrieve the
 	 * columns used in them.  Doesn't seem worth detecting that case though.)
 	 */
-
 	fpinfo->attrs_used = NULL;
-	pull_varattnos((Node *)baserel->reltarget->exprs, baserel->relid,
-		&fpinfo->attrs_used);
-	foreach (lc, fpinfo->local_conds) {
+	pull_varattnos((Node *) baserel->reltarget->exprs, baserel->relid,
+				   &fpinfo->attrs_used);
+	foreach(lc, fpinfo->local_conds)
+	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 
-		pull_varattnos((Node *)rinfo->clause, baserel->relid,
-			&fpinfo->attrs_used);
+		pull_varattnos((Node *) rinfo->clause, baserel->relid,
+					   &fpinfo->attrs_used);
 	}
 
 	/*
@@ -452,10 +474,10 @@ kiteGetForeignRelSize(PlannerInfo *root,
 	 * conditions is to estimate selectivity on the basis of local statistics.
 	 */
 	fpinfo->local_conds_sel = clauselist_selectivity(root,
-		fpinfo->local_conds,
-		baserel->relid,
-		JOIN_INNER,
-		NULL);
+													 fpinfo->local_conds,
+													 baserel->relid,
+													 JOIN_INNER,
+													 NULL);
 
 	cost_qual_eval(&fpinfo->local_conds_cost, fpinfo->local_conds, root);
 
@@ -475,33 +497,38 @@ kiteGetForeignRelSize(PlannerInfo *root,
 	 * average row width.  Otherwise, estimate using whatever statistics we
 	 * have locally, in a way similar to ordinary tables.
 	 */
-	if (fpinfo->use_remote_estimate) {
+	if (fpinfo->use_remote_estimate)
+	{
 		/*
 		 * Get cost/size estimates with help of remote server.  Save the
 		 * values in fpinfo so we don't need to do it again to generate the
 		 * basic foreign path.
 		 */
 		estimate_path_cost_size(root, baserel, NIL, NIL, NULL,
-			&fpinfo->rows, &fpinfo->width,
-			&fpinfo->startup_cost, &fpinfo->total_cost);
+								&fpinfo->rows, &fpinfo->width,
+								&fpinfo->startup_cost, &fpinfo->total_cost);
 
 		/* Report estimated baserel size to planner. */
 		baserel->rows = fpinfo->rows;
 		baserel->reltarget->width = fpinfo->width;
-	} else {
+	}
+	else
+	{
 		/*
-		 * If the foreign table has never been ANALYZEd, it will have
-		 * reltuples < 0, meaning "unknown".  We can't do much if we're not
+		 * If the foreign table has never been ANALYZEd, it will have relpages
+		 * and reltuples equal to zero, which most likely has nothing to do
+		 * with reality.  We can't do a whole lot about that if we're not
 		 * allowed to consult the remote server, but we can use a hack similar
 		 * to plancat.c's treatment of empty relations: use a minimum size
 		 * estimate of 10 pages, and divide by the column-datatype-based width
 		 * estimate to get the corresponding number of tuples.
 		 */
-		if (baserel->tuples < 0) {
+		if (baserel->pages == 0 && baserel->tuples == 0)
+		{
 			baserel->pages = 10;
 			baserel->tuples =
 				(10 * BLCKSZ) / (baserel->reltarget->width +
-									MAXALIGN(SizeofHeapTupleHeader));
+								 MAXALIGN(SizeofHeapTupleHeader));
 		}
 
 		/* Estimate baserel size as best we can with local statistics. */
@@ -509,16 +536,26 @@ kiteGetForeignRelSize(PlannerInfo *root,
 
 		/* Fill in basically-bogus cost estimates for use later. */
 		estimate_path_cost_size(root, baserel, NIL, NIL, NULL,
-			&fpinfo->rows, &fpinfo->width,
-			&fpinfo->startup_cost, &fpinfo->total_cost);
+								&fpinfo->rows, &fpinfo->width,
+								&fpinfo->startup_cost, &fpinfo->total_cost);
 	}
 
 	/*
-	 * fpinfo->relation_name gets the numeric rangetable index of the foreign
-	 * table RTE.  (If this query gets EXPLAIN'd, we'll convert that to a
-	 * human-readable string at that time.)
+	 * Set the name of relation in fpinfo, while we are constructing it here.
+	 * It will be used to build the string describing the join relation in
+	 * EXPLAIN output. We can't know whether VERBOSE option is specified or
+	 * not, so always schema-qualify the foreign table name.
 	 */
-	fpinfo->relation_name = psprintf("%u", baserel->relid);
+	fpinfo->relation_name = makeStringInfo();
+	namespace = get_namespace_name(get_rel_namespace(foreigntableid));
+	relname = get_rel_name(foreigntableid);
+	refname = rte->eref->aliasname;
+	appendStringInfo(fpinfo->relation_name, "%s.%s",
+					 quote_identifier(namespace),
+					 quote_identifier(relname));
+	if (*refname && strcmp(refname, relname) != 0)
+		appendStringInfo(fpinfo->relation_name, " %s",
+						 quote_identifier(rte->eref->aliasname));
 
 	/* No outer and inner relations. */
 	fpinfo->make_outerrel_subquery = false;
@@ -529,15 +566,237 @@ kiteGetForeignRelSize(PlannerInfo *root,
 }
 
 /*
+ * get_useful_ecs_for_relation
+ *		Determine which EquivalenceClasses might be involved in useful
+ *		orderings of this relation.
+ *
+ * This function is in some respects a mirror image of the core function
+ * pathkeys_useful_for_merging: for a regular table, we know what indexes
+ * we have and want to test whether any of them are useful.  For a foreign
+ * table, we don't know what indexes are present on the remote side but
+ * want to speculate about which ones we'd like to use if they existed.
+ *
+ * This function returns a list of potentially-useful equivalence classes,
+ * but it does not guarantee that an EquivalenceMember exists which contains
+ * Vars only from the given relation.  For example, given ft1 JOIN t1 ON
+ * ft1.x + t1.x = 0, this function will say that the equivalence class
+ * containing ft1.x + t1.x is potentially useful.  Supposing ft1 is remote and
+ * t1 is local (or on a different server), it will turn out that no useful
+ * ORDER BY clause can be generated.  It's not our job to figure that out
+ * here; we're only interested in identifying relevant ECs.
+ */
+static List *
+get_useful_ecs_for_relation(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *useful_eclass_list = NIL;
+	ListCell   *lc;
+	Relids		relids;
+
+	/*
+	 * First, consider whether any active EC is potentially useful for a merge
+	 * join against this relation.
+	 */
+	if (rel->has_eclass_joins)
+	{
+		foreach(lc, root->eq_classes)
+		{
+			EquivalenceClass *cur_ec = (EquivalenceClass *) lfirst(lc);
+
+			if (eclass_useful_for_merging(root, cur_ec, rel))
+				useful_eclass_list = lappend(useful_eclass_list, cur_ec);
+		}
+	}
+
+	/*
+	 * Next, consider whether there are any non-EC derivable join clauses that
+	 * are merge-joinable.  If the joininfo list is empty, we can exit
+	 * quickly.
+	 */
+	if (rel->joininfo == NIL)
+		return useful_eclass_list;
+
+	/* If this is a child rel, we must use the topmost parent rel to search. */
+	if (IS_OTHER_REL(rel))
+	{
+		Assert(!bms_is_empty(rel->top_parent_relids));
+		relids = rel->top_parent_relids;
+	}
+	else
+		relids = rel->relids;
+
+	/* Check each join clause in turn. */
+	foreach(lc, rel->joininfo)
+	{
+		RestrictInfo *restrictinfo = (RestrictInfo *) lfirst(lc);
+
+		/* Consider only mergejoinable clauses */
+		if (restrictinfo->mergeopfamilies == NIL)
+			continue;
+
+		/* Make sure we've got canonical ECs. */
+		update_mergeclause_eclasses(root, restrictinfo);
+
+		/*
+		 * restrictinfo->mergeopfamilies != NIL is sufficient to guarantee
+		 * that left_ec and right_ec will be initialized, per comments in
+		 * distribute_qual_to_rels.
+		 *
+		 * We want to identify which side of this merge-joinable clause
+		 * contains columns from the relation produced by this RelOptInfo. We
+		 * test for overlap, not containment, because there could be extra
+		 * relations on either side.  For example, suppose we've got something
+		 * like ((A JOIN B ON A.x = B.x) JOIN C ON A.y = C.y) LEFT JOIN D ON
+		 * A.y = D.y.  The input rel might be the joinrel between A and B, and
+		 * we'll consider the join clause A.y = D.y. relids contains a
+		 * relation not involved in the join class (B) and the equivalence
+		 * class for the left-hand side of the clause contains a relation not
+		 * involved in the input rel (C).  Despite the fact that we have only
+		 * overlap and not containment in either direction, A.y is potentially
+		 * useful as a sort column.
+		 *
+		 * Note that it's even possible that relids overlaps neither side of
+		 * the join clause.  For example, consider A LEFT JOIN B ON A.x = B.x
+		 * AND A.x = 1.  The clause A.x = 1 will appear in B's joininfo list,
+		 * but overlaps neither side of B.  In that case, we just skip this
+		 * join clause, since it doesn't suggest a useful sort order for this
+		 * relation.
+		 */
+		if (bms_overlap(relids, restrictinfo->right_ec->ec_relids))
+			useful_eclass_list = list_append_unique_ptr(useful_eclass_list,
+														restrictinfo->right_ec);
+		else if (bms_overlap(relids, restrictinfo->left_ec->ec_relids))
+			useful_eclass_list = list_append_unique_ptr(useful_eclass_list,
+														restrictinfo->left_ec);
+	}
+
+	return useful_eclass_list;
+}
+
+/*
+ * get_useful_pathkeys_for_relation
+ *		Determine which orderings of a relation might be useful.
+ *
+ * Getting data in sorted order can be useful either because the requested
+ * order matches the final output ordering for the overall query we're
+ * planning, or because it enables an efficient merge join.  Here, we try
+ * to figure out which pathkeys to consider.
+ */
+static List *
+get_useful_pathkeys_for_relation(PlannerInfo *root, RelOptInfo *rel)
+{
+	List	   *useful_pathkeys_list = NIL;
+	List	   *useful_eclass_list;
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) rel->fdw_private;
+	EquivalenceClass *query_ec = NULL;
+	ListCell   *lc;
+
+	/*
+	 * Pushing the query_pathkeys to the remote server is always worth
+	 * considering, because it might let us avoid a local sort.
+	 */
+	fpinfo->qp_is_pushdown_safe = false;
+	if (root->query_pathkeys)
+	{
+		bool		query_pathkeys_ok = true;
+
+		foreach(lc, root->query_pathkeys)
+		{
+			PathKey    *pathkey = (PathKey *) lfirst(lc);
+
+			/*
+			 * The planner and executor don't have any clever strategy for
+			 * taking data sorted by a prefix of the query's pathkeys and
+			 * getting it to be sorted by all of those pathkeys. We'll just
+			 * end up resorting the entire data set.  So, unless we can push
+			 * down all of the query pathkeys, forget it.
+			 */
+			if (!is_foreign_pathkey(root, rel, pathkey))
+			{
+				query_pathkeys_ok = false;
+				break;
+			}
+		}
+
+		if (query_pathkeys_ok)
+		{
+			useful_pathkeys_list = list_make1(list_copy(root->query_pathkeys));
+			fpinfo->qp_is_pushdown_safe = true;
+		}
+	}
+
+	/*
+	 * Even if we're not using remote estimates, having the remote side do the
+	 * sort generally won't be any worse than doing it locally, and it might
+	 * be much better if the remote side can generate data in the right order
+	 * without needing a sort at all.  However, what we're going to do next is
+	 * try to generate pathkeys that seem promising for possible merge joins,
+	 * and that's more speculative.  A wrong choice might hurt quite a bit, so
+	 * bail out if we can't use remote estimates.
+	 */
+	if (!fpinfo->use_remote_estimate)
+		return useful_pathkeys_list;
+
+	/* Get the list of interesting EquivalenceClasses. */
+	useful_eclass_list = get_useful_ecs_for_relation(root, rel);
+
+	/* Extract unique EC for query, if any, so we don't consider it again. */
+	if (list_length(root->query_pathkeys) == 1)
+	{
+		PathKey    *query_pathkey = linitial(root->query_pathkeys);
+
+		query_ec = query_pathkey->pk_eclass;
+	}
+
+	/*
+	 * As a heuristic, the only pathkeys we consider here are those of length
+	 * one.  It's surely possible to consider more, but since each one we
+	 * choose to consider will generate a round-trip to the remote side, we
+	 * need to be a bit cautious here.  It would sure be nice to have a local
+	 * cache of information about remote index definitions...
+	 */
+	foreach(lc, useful_eclass_list)
+	{
+		EquivalenceClass *cur_ec = lfirst(lc);
+		PathKey    *pathkey;
+
+		/* If redundant with what we did above, skip it. */
+		if (cur_ec == query_ec)
+			continue;
+
+		/* Can't push down the sort if the EC's opfamily is not shippable. */
+		if (!is_shippable(linitial_oid(cur_ec->ec_opfamilies),
+						  OperatorFamilyRelationId, fpinfo))
+			continue;
+
+		/* If no pushable expression for this rel, skip it. */
+		if (find_em_for_rel(root, cur_ec, rel) == NULL)
+			continue;
+
+		/* Looks like we can generate a pathkey, so let's do it. */
+		pathkey = make_canonical_pathkey(root, cur_ec,
+										 linitial_oid(cur_ec->ec_opfamilies),
+										 BTLessStrategyNumber,
+										 false);
+		useful_pathkeys_list = lappend(useful_pathkeys_list,
+									   list_make1(pathkey));
+	}
+
+	return useful_pathkeys_list;
+}
+
+/*
  * kiteGetForeignPaths
  *		Create possible scan paths for a scan on the foreign table
  */
 static void
 kiteGetForeignPaths(PlannerInfo *root,
-	RelOptInfo *baserel,
-	Oid foreigntableid) {
-	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *)baserel->fdw_private;
+						RelOptInfo *baserel,
+						Oid foreigntableid)
+{
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) baserel->fdw_private;
 	ForeignPath *path;
+	List	   *ppi_list;
+	ListCell   *lc;
 
 	/*
 	 * Create simplest ForeignScan path node and add it to baserel.  This path
@@ -550,15 +809,188 @@ kiteGetForeignPaths(PlannerInfo *root,
 	 * parameterization due to LATERAL refs in its tlist.
 	 */
 	path = create_foreignscan_path(root, baserel,
-		NULL, /* default pathtarget */
-		fpinfo->rows,
-		fpinfo->startup_cost,
-		fpinfo->total_cost,
-		NIL, /* no pathkeys */
-		baserel->lateral_relids,
-		NULL, /* no extra plan */
-		NIL); /* no fdw_private list */
-	add_path(baserel, (Path *)path);
+								   NULL,	/* default pathtarget */
+								   fpinfo->rows,
+								   fpinfo->startup_cost,
+								   fpinfo->total_cost,
+								   NIL, /* no pathkeys */
+								   baserel->lateral_relids,
+								   NULL,	/* no extra plan */
+								   NIL);	/* no fdw_private list */
+	add_path(baserel, (Path *) path);
+
+	/* Add paths with pathkeys */
+	add_paths_with_pathkeys_for_rel(root, baserel, NULL);
+
+	/*
+	 * If we're not using remote estimates, stop here.  We have no way to
+	 * estimate whether any join clauses would be worth sending across, so
+	 * don't bother building parameterized paths.
+	 */
+	if (!fpinfo->use_remote_estimate)
+		return;
+
+	/*
+	 * Thumb through all join clauses for the rel to identify which outer
+	 * relations could supply one or more safe-to-send-to-remote join clauses.
+	 * We'll build a parameterized path for each such outer relation.
+	 *
+	 * It's convenient to manage this by representing each candidate outer
+	 * relation by the ParamPathInfo node for it.  We can then use the
+	 * ppi_clauses list in the ParamPathInfo node directly as a list of the
+	 * interesting join clauses for that rel.  This takes care of the
+	 * possibility that there are multiple safe join clauses for such a rel,
+	 * and also ensures that we account for unsafe join clauses that we'll
+	 * still have to enforce locally (since the parameterized-path machinery
+	 * insists that we handle all movable clauses).
+	 */
+	ppi_list = NIL;
+	foreach(lc, baserel->joininfo)
+	{
+		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+		Relids		required_outer;
+		ParamPathInfo *param_info;
+
+		/* Check if clause can be moved to this rel */
+		if (!join_clause_is_movable_to(rinfo, baserel))
+			continue;
+
+		/* See if it is safe to send to remote */
+		if (!is_foreign_expr(root, baserel, rinfo->clause))
+			continue;
+
+		/* Calculate required outer rels for the resulting path */
+		required_outer = bms_union(rinfo->clause_relids,
+								   baserel->lateral_relids);
+		/* We do not want the foreign rel itself listed in required_outer */
+		required_outer = bms_del_member(required_outer, baserel->relid);
+
+		/*
+		 * required_outer probably can't be empty here, but if it were, we
+		 * couldn't make a parameterized path.
+		 */
+		if (bms_is_empty(required_outer))
+			continue;
+
+		/* Get the ParamPathInfo */
+		param_info = get_baserel_parampathinfo(root, baserel,
+											   required_outer);
+		Assert(param_info != NULL);
+
+		/*
+		 * Add it to list unless we already have it.  Testing pointer equality
+		 * is OK since get_baserel_parampathinfo won't make duplicates.
+		 */
+		ppi_list = list_append_unique_ptr(ppi_list, param_info);
+	}
+
+	/*
+	 * The above scan examined only "generic" join clauses, not those that
+	 * were absorbed into EquivalenceClauses.  See if we can make anything out
+	 * of EquivalenceClauses.
+	 */
+	if (baserel->has_eclass_joins)
+	{
+		/*
+		 * We repeatedly scan the eclass list looking for column references
+		 * (or expressions) belonging to the foreign rel.  Each time we find
+		 * one, we generate a list of equivalence joinclauses for it, and then
+		 * see if any are safe to send to the remote.  Repeat till there are
+		 * no more candidate EC members.
+		 */
+		ec_member_foreign_arg arg;
+
+		arg.already_used = NIL;
+		for (;;)
+		{
+			List	   *clauses;
+
+			/* Make clauses, skipping any that join to lateral_referencers */
+			arg.current = NULL;
+			clauses = generate_implied_equalities_for_column(root,
+															 baserel,
+															 ec_member_matches_foreign,
+															 (void *) &arg,
+															 baserel->lateral_referencers);
+
+			/* Done if there are no more expressions in the foreign rel */
+			if (arg.current == NULL)
+			{
+				Assert(clauses == NIL);
+				break;
+			}
+
+			/* Scan the extracted join clauses */
+			foreach(lc, clauses)
+			{
+				RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+				Relids		required_outer;
+				ParamPathInfo *param_info;
+
+				/* Check if clause can be moved to this rel */
+				if (!join_clause_is_movable_to(rinfo, baserel))
+					continue;
+
+				/* See if it is safe to send to remote */
+				if (!is_foreign_expr(root, baserel, rinfo->clause))
+					continue;
+
+				/* Calculate required outer rels for the resulting path */
+				required_outer = bms_union(rinfo->clause_relids,
+										   baserel->lateral_relids);
+				required_outer = bms_del_member(required_outer, baserel->relid);
+				if (bms_is_empty(required_outer))
+					continue;
+
+				/* Get the ParamPathInfo */
+				param_info = get_baserel_parampathinfo(root, baserel,
+													   required_outer);
+				Assert(param_info != NULL);
+
+				/* Add it to list unless we already have it */
+				ppi_list = list_append_unique_ptr(ppi_list, param_info);
+			}
+
+			/* Try again, now ignoring the expression we found this time */
+			arg.already_used = lappend(arg.already_used, arg.current);
+		}
+	}
+
+	/*
+	 * Now build a path for each useful outer relation.
+	 */
+	foreach(lc, ppi_list)
+	{
+		ParamPathInfo *param_info = (ParamPathInfo *) lfirst(lc);
+		double		rows;
+		int			width;
+		Cost		startup_cost;
+		Cost		total_cost;
+
+		/* Get a cost estimate from the remote */
+		estimate_path_cost_size(root, baserel,
+								param_info->ppi_clauses, NIL, NULL,
+								&rows, &width,
+								&startup_cost, &total_cost);
+
+		/*
+		 * ppi_rows currently won't get looked at by anything, but still we
+		 * may as well ensure that it matches our idea of the rowcount.
+		 */
+		param_info->ppi_rows = rows;
+
+		/* Make the path */
+		path = create_foreignscan_path(root, baserel,
+									   NULL,	/* default pathtarget */
+									   rows,
+									   startup_cost,
+									   total_cost,
+									   NIL, /* no pathkeys */
+									   param_info->ppi_req_outer,
+									   NULL,
+									   NIL);	/* no fdw_private list */
+		add_path(baserel, (Path *) path);
+	}
 }
 
 /*
@@ -567,41 +999,45 @@ kiteGetForeignPaths(PlannerInfo *root,
  */
 static ForeignScan *
 kiteGetForeignPlan(PlannerInfo *root,
-	RelOptInfo *foreignrel,
-	Oid foreigntableid,
-	ForeignPath *best_path,
-	List *tlist,
-	List *scan_clauses,
-	Plan *outer_plan) {
-	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *)foreignrel->fdw_private;
-	Index scan_relid;
-	List *fdw_private;
-	List *remote_exprs = NIL;
-	List *local_exprs = NIL;
-	List *params_list = NIL;
-	List *fdw_scan_tlist = NIL;
-	List *fdw_recheck_quals = NIL;
-	List *retrieved_attrs = NIL;
+					   RelOptInfo *foreignrel,
+					   Oid foreigntableid,
+					   ForeignPath *best_path,
+					   List *tlist,
+					   List *scan_clauses,
+					   Plan *outer_plan)
+{
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) foreignrel->fdw_private;
+	Index		scan_relid;
+	List	   *fdw_private;
+	List	   *remote_exprs = NIL;
+	List	   *local_exprs = NIL;
+	List	   *params_list = NIL;
+	List	   *fdw_scan_tlist = NIL;
+	List	   *fdw_recheck_quals = NIL;
+	List	   *retrieved_attrs;
 	List *retrieved_aggfnoids = NIL;
 	List *retrieved_groupby_attrs = NIL;
 	StringInfoData sql;
 	StringInfoData schema;
-	bool has_final_sort = false;
-	bool has_limit = false;
-	ListCell *lc;
+	bool		has_final_sort = false;
+	bool		has_limit = false;
+	ListCell   *lc;
 	kite_filespec_t *fspec;
+	StringInfoData fspecstr;
 
 	/*
 	 * Get FDW private data created by kiteGetForeignUpperPaths(), if any.
 	 */
-	if (best_path->fdw_private) {
+	if (best_path->fdw_private)
+	{
 		has_final_sort = intVal(list_nth(best_path->fdw_private,
-			FdwPathPrivateHasFinalSort));
+										 FdwPathPrivateHasFinalSort));
 		has_limit = intVal(list_nth(best_path->fdw_private,
-			FdwPathPrivateHasLimit));
+									FdwPathPrivateHasLimit));
 	}
 
-	if (IS_SIMPLE_REL(foreignrel)) {
+	if (IS_SIMPLE_REL(foreignrel))
+	{
 		/*
 		 * For base relations, set scan_relid as the relid of the relation.
 		 */
@@ -626,7 +1062,8 @@ kiteGetForeignPlan(PlannerInfo *root,
 		 * except for the additional decision about remote versus local
 		 * execution.
 		 */
-		foreach (lc, scan_clauses) {
+		foreach(lc, scan_clauses)
+		{
 			RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 
 			/* Ignore any pseudoconstants, they're dealt with elsewhere */
@@ -648,7 +1085,9 @@ kiteGetForeignPlan(PlannerInfo *root,
 		 * should recheck all the remote quals.
 		 */
 		fdw_recheck_quals = remote_exprs;
-	} else {
+	}
+	else
+	{
 		/*
 		 * Join relation or upper relation - set scan_relid to 0.
 		 */
@@ -688,8 +1127,9 @@ kiteGetForeignPlan(PlannerInfo *root,
 		 * from outer plan's quals, lest they be evaluated twice, once by the
 		 * local plan and once by the scan.
 		 */
-		if (outer_plan) {
-			ListCell *lc;
+		if (outer_plan)
+		{
+			ListCell   *lc;
 
 			/*
 			 * Right now, we only consider grouping and aggregation beyond
@@ -704,8 +1144,9 @@ kiteGetForeignPlan(PlannerInfo *root,
 			 * which case we'll fail to remove them; it's not worth working
 			 * harder than this.
 			 */
-			foreach (lc, local_exprs) {
-				Node *qual = lfirst(lc);
+			foreach(lc, local_exprs)
+			{
+				Node	   *qual = lfirst(lc);
 
 				outer_plan->qual = list_delete(outer_plan->qual, qual);
 
@@ -717,12 +1158,13 @@ kiteGetForeignPlan(PlannerInfo *root,
 				 */
 				if (IsA(outer_plan, NestLoop) ||
 					IsA(outer_plan, MergeJoin) ||
-					IsA(outer_plan, HashJoin)) {
-					Join *join_plan = (Join *)outer_plan;
+					IsA(outer_plan, HashJoin))
+				{
+					Join	   *join_plan = (Join *) outer_plan;
 
 					if (join_plan->jointype == JOIN_INNER)
 						join_plan->joinqual = list_delete(join_plan->joinqual,
-							qual);
+														  qual);
 				}
 			}
 
@@ -731,7 +1173,7 @@ kiteGetForeignPlan(PlannerInfo *root,
 			 * a Result node atop the plan tree.
 			 */
 			outer_plan = change_plan_targetlist(outer_plan, fdw_scan_tlist,
-				best_path->path.parallel_safe);
+												best_path->path.parallel_safe);
 		}
 	}
 
@@ -741,12 +1183,11 @@ kiteGetForeignPlan(PlannerInfo *root,
 	 */
 	initStringInfo(&sql);
 	deparseSelectStmtForRel(&sql, root, foreignrel, fdw_scan_tlist,
-		remote_exprs, best_path->path.pathkeys,
-		has_final_sort, has_limit, false,
-		&retrieved_attrs, &params_list, &retrieved_aggfnoids,
-		&retrieved_groupby_attrs);
+							remote_exprs, best_path->path.pathkeys,
+							has_final_sort, has_limit, false,
+							&retrieved_attrs, &params_list,
+							&retrieved_aggfnoids, &retrieved_groupby_attrs);
 
-	//elog(LOG, "FINAL SQL: %s", sql.data);
 	/* Remember remote_exprs for possible use by kitePlanDirectModify */
 	fpinfo->final_remote_exprs = remote_exprs;
 
@@ -782,32 +1223,33 @@ kiteGetForeignPlan(PlannerInfo *root,
 	}
 	fspec->u.csv.header_line = fpinfo->csv_header;
 
-
+	initStringInfo(&fspecstr);
+	filespec_serialize(fspec, &fspecstr);
 
 	/*
 	 * Build the fdw_private list that will be available to the executor.
 	 * Items in the list must match order in enum FdwScanPrivateIndex.
 	 */
 	fdw_private = list_make5(makeString(schema.data),
-		makeString(sql.data),
-		retrieved_attrs,
-		makeInteger(fpinfo->fetch_size),
-		makeInteger(fpinfo->fragcnt));
+					makeString(sql.data),
+					retrieved_attrs,
+					makeInteger(fpinfo->fetch_size),
+					makeInteger(fpinfo->fragcnt));
 
-	fdw_private = lappend(fdw_private, fspec);
+	fdw_private = lappend(fdw_private, makeString(fspecstr.data));
 
 	if (IS_JOIN_REL(foreignrel) || IS_UPPER_REL(foreignrel)) {
 		fdw_private = lappend(fdw_private,
-			makeString(fpinfo->relation_name));
+							  makeString(fpinfo->relation_name->data));
 
-		fdw_private = lappend(fdw_private,
-			retrieved_aggfnoids);
+		fdw_private = lappend(fdw_private, retrieved_aggfnoids);
 
 		if (retrieved_groupby_attrs) {
-			fdw_private = lappend(fdw_private,
-				retrieved_groupby_attrs);
+			fdw_private = lappend(fdw_private, retrieved_groupby_attrs);
 		}
+
 	}
+
 
 	/*
 	 * Create the ForeignScan node for the given relation.
@@ -817,63 +1259,13 @@ kiteGetForeignPlan(PlannerInfo *root,
 	 * because then they wouldn't be subject to later planner processing.
 	 */
 	return make_foreignscan(tlist,
-		local_exprs,
-		scan_relid,
-		params_list,
-		fdw_private,
-		fdw_scan_tlist,
-		fdw_recheck_quals,
-		outer_plan);
-}
-
-/*
- * Construct a tuple descriptor for the scan tuples handled by a foreign join.
- */
-static TupleDesc
-get_tupdesc_for_join_scan_tuples(ForeignScanState *node) {
-	ForeignScan *fsplan = (ForeignScan *)node->ss.ps.plan;
-	EState *estate = node->ss.ps.state;
-	TupleDesc tupdesc;
-
-	/*
-	 * The core code has already set up a scan tuple slot based on
-	 * fsplan->fdw_scan_tlist, and this slot's tupdesc is mostly good enough,
-	 * but there's one case where it isn't.  If we have any whole-row row
-	 * identifier Vars, they may have vartype RECORD, and we need to replace
-	 * that with the associated table's actual composite type.  This ensures
-	 * that when we read those ROW() expression values from the remote server,
-	 * we can convert them to a composite type the local server knows.
-	 */
-	tupdesc = CreateTupleDescCopy(node->ss.ss_ScanTupleSlot->tts_tupleDescriptor);
-	for (int i = 0; i < tupdesc->natts; i++) {
-		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-		Var *var;
-		RangeTblEntry *rte;
-		Oid reltype;
-
-		/* Nothing to do if it's not a generic RECORD attribute */
-		if (att->atttypid != RECORDOID || att->atttypmod >= 0)
-			continue;
-
-		/*
-		 * If we can't identify the referenced table, do nothing.  This'll
-		 * likely lead to failure later, but perhaps we can muddle through.
-		 */
-		var = (Var *)list_nth_node(TargetEntry, fsplan->fdw_scan_tlist,
-			i)
-				  ->expr;
-		if (!IsA(var, Var) || var->varattno != 0)
-			continue;
-		rte = list_nth(estate->es_range_table, var->varno - 1);
-		if (rte->rtekind != RTE_RELATION)
-			continue;
-		reltype = get_rel_type_id(rte->relid);
-		if (!OidIsValid(reltype))
-			continue;
-		att->atttypid = reltype;
-		/* shouldn't need to change anything else */
-	}
-	return tupdesc;
+							local_exprs,
+							scan_relid,
+							params_list,
+							fdw_private,
+							fdw_scan_tlist,
+							fdw_recheck_quals,
+							outer_plan);
 }
 
 /*
@@ -881,17 +1273,19 @@ get_tupdesc_for_join_scan_tuples(ForeignScanState *node) {
  *		Initiate an executor scan of a foreign PostgreSQL table.
  */
 static void
-kiteBeginForeignScan(ForeignScanState *node, int eflags) {
-	ForeignScan *fsplan = (ForeignScan *)node->ss.ps.plan;
-	EState *estate = node->ss.ps.state;
+kiteBeginForeignScan(ForeignScanState *node, int eflags)
+{
+	ForeignScan *fsplan = (ForeignScan *) node->ss.ps.plan;
+	EState	   *estate = node->ss.ps.state;
 	PgFdwScanState *fsstate;
 	RangeTblEntry *rte;
-	Oid userid;
+	Oid			userid;
 	ForeignTable *table;
 	UserMapping *user;
-	int rtindex;
-	int numParams;
+	int			rtindex;
+	int			numParams;
 
+	elog(LOG, "KITE Begin Foreign Scan");
 	/*
 	 * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
 	 */
@@ -901,8 +1295,8 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 	/*
 	 * We'll save private state in node->fdw_state.
 	 */
-	fsstate = (PgFdwScanState *)palloc0(sizeof(PgFdwScanState));
-	node->fdw_state = (void *)fsstate;
+	fsstate = (PgFdwScanState *) palloc0(sizeof(PgFdwScanState));
+	node->fdw_state = (void *) fsstate;
 
 	/*
 	 * Identify which user to do the remote access as.  This should match what
@@ -921,59 +1315,36 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 	table = GetForeignTable(rte->relid);
 	user = GetUserMapping(userid, table->serverid);
 
-	if (table->exec_location == FTEXECLOCATION_ALL_SEGMENTS && Gp_role == GP_ROLE_EXECUTE) {
-		// parallel load here
-		fsstate->fragid = GpIdentity.segindex;
-		fsstate->fragcnt = getgpsegmentCount();
-		fsstate->mpp_allsegment = true;
-	} else {
-		// single server
-		fsstate->mpp_allsegment = false;
-		fsstate->fragid = -1;
-		fsstate->fragcnt = 1;
-	}
+	/*
+	 * Get connection to the foreign server.  Connection manager will
+	 * establish new connection if necessary.
+	 */
+	fsstate->req = GetConnection(user, false);
 
-	/* KITE */
-	fsstate->req = GetConnection(user, false, &fsstate->conn_state);
-	fsstate->cursor_exists = false;
+	/* Assign a unique ID for my cursor */
 	fsstate->cursor_number = 0;
-	/* END KITE */
+	fsstate->cursor_exists = false;
 
 	/* Get private info created by planner functions. */
 	fsstate->schema = strVal(list_nth(fsplan->fdw_private, FdwScanPrivateSchema));
 	fsstate->query = strVal(list_nth(fsplan->fdw_private,
-		FdwScanPrivateSelectSql));
-	fsstate->retrieved_attrs = (List *)list_nth(fsplan->fdw_private,
-		FdwScanPrivateRetrievedAttrs);
+									 FdwScanPrivateSelectSql));
+	fsstate->retrieved_attrs = (List *) list_nth(fsplan->fdw_private,
+												 FdwScanPrivateRetrievedAttrs);
 	fsstate->fetch_size = intVal(list_nth(fsplan->fdw_private,
-		FdwScanPrivateFetchSize));
+										  FdwScanPrivateFetchSize));
 	fsstate->fragcnt = intVal(list_nth(fsplan->fdw_private,
 		FdwScanPrivateFragCnt));
-	fsstate->fspec = (kite_filespec_t *)list_nth(fsplan->fdw_private, FdwScanPrivateFileSpec);
-
-	/* limit fragcnt to getgpsegmentCount() when mpp_allsegment = true */
-	if (fsstate->mpp_allsegment) {
-		if (fsstate->fragcnt < 0) {
-			fsstate->fragcnt = getgpsegmentCount();
-		}
-	       	if (fsstate->fragcnt > getgpsegmentCount()) {
-			fsstate->fragcnt = getgpsegmentCount();
-		}
-	} else {
-		if (fsstate->fragcnt < 0) {
-			elog(INFO, "fragcnt cannot be -1 when mpp_execute = 'all segment'. set fragcnt = 1.");
-			fsstate->fragcnt = 1;
-		}
-	}
-
+	char *fspec = strVal(list_nth(fsplan->fdw_private, FdwScanPrivateFileSpec));
+	fsstate->fspec = filespec_deserialize(fspec);
 
 	/* Create contexts for batches of tuples and per-tuple temp workspace. */
 	fsstate->batch_cxt = AllocSetContextCreate(estate->es_query_cxt,
-		"kite_fdw tuple data",
-		ALLOCSET_DEFAULT_SIZES);
+											   "kite_fdw tuple data",
+											   ALLOCSET_DEFAULT_SIZES);
 	fsstate->temp_cxt = AllocSetContextCreate(estate->es_query_cxt,
-		"kite_fdw temporary data",
-		ALLOCSET_SMALL_SIZES);
+											  "kite_fdw temporary data",
+											  ALLOCSET_SMALL_SIZES);
 
 	if (list_length(fsplan->fdw_private) >= FdwScanPrivateRetrievedAggfnoids + 1) {
 		fsstate->retrieved_aggfnoids = (List *)list_nth(fsplan->fdw_private,
@@ -985,16 +1356,41 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 			FdwScanPrivateRetrievedGroupByAttrs);
 	}
 
+	if (table->exec_location == FTEXECLOCATION_ALL_SEGMENTS && Gp_role == GP_ROLE_EXECUTE) {
+		// parallel load here
+		fsstate->fragid = GpIdentity.segindex;
+
+		if (fsstate->fragcnt < 0) {
+			fsstate->fragcnt = getgpsegmentCount();
+		}
+	       	if (fsstate->fragcnt > getgpsegmentCount()) {
+			fsstate->fragcnt = getgpsegmentCount();
+		}
+
+		fsstate->mpp_allsegment = true;
+	} else {
+		// single server
+		fsstate->mpp_allsegment = false;
+		fsstate->fragid = -1;
+		if (fsstate->fragcnt < 0) {
+			elog(INFO, "fragcnt cannot be -1 when mpp_execute = 'master|any'. set fragcnt = 1.");
+			fsstate->fragcnt = 1;
+		}
+	}
+
 	/*
 	 * Get info we'll need for converting data fetched from the foreign server
 	 * into local representation and error reporting during that process.
 	 */
-	if (fsplan->scan.scanrelid > 0) {
+	if (fsplan->scan.scanrelid > 0)
+	{
 		fsstate->rel = node->ss.ss_currentRelation;
 		fsstate->tupdesc = RelationGetDescr(fsstate->rel);
-	} else {
+	}
+	else
+	{
 		fsstate->rel = NULL;
-		fsstate->tupdesc = get_tupdesc_for_join_scan_tuples(node);
+		fsstate->tupdesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	}
 
 	fsstate->attinmeta = TupleDescGetAttInMetadata(fsstate->tupdesc);
@@ -1005,22 +1401,20 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
 	numParams = list_length(fsplan->fdw_exprs);
 	fsstate->numParams = numParams;
 
-#if 1
+#if 1 
 	/* KITE */
 	if (numParams > 0) {
 		elog(ERROR, "Statement with muiltple parameters not supported");
 	}
 	/* END KITE */
 #else
-
 	if (numParams > 0)
-		prepare_query_params((PlanState *)node,
-			fsplan->fdw_exprs,
-			numParams,
-			&fsstate->param_flinfo,
-			&fsstate->param_exprs,
-			&fsstate->param_values);
-
+		prepare_query_params((PlanState *) node,
+							 fsplan->fdw_exprs,
+							 numParams,
+							 &fsstate->param_flinfo,
+							 &fsstate->param_exprs,
+							 &fsstate->param_values);
 #endif
 	/*
 	 * Prepare xrg_agg
@@ -1047,29 +1441,26 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags) {
  *		EOF.
  */
 static TupleTableSlot *
-kiteIterateForeignScan(ForeignScanState *node) {
-	PgFdwScanState *fsstate = (PgFdwScanState *)node->fdw_state;
+kiteIterateForeignScan(ForeignScanState *node)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 
 	/*
-	 * In sync mode, if this is the first call after Begin or ReScan, we need
-	 * to create the cursor on the remote side.  In async mode, we would have
-	 * already created the cursor before we get here, even if this is the
-	 * first call after Begin or ReScan.
+	 * If this is the first call after Begin or ReScan, we need to create the
+	 * cursor on the remote side.
 	 */
-	if (!fsstate->cursor_exists) {
+	if (!fsstate->cursor_exists)
 		create_cursor(node);
-	}
 
 	/*
 	 * Get some more tuples, if we've run out.
 	 */
-	if (fsstate->next_tuple >= fsstate->num_tuples) {
+	if (fsstate->next_tuple >= fsstate->num_tuples)
+	{
 		/* No point in another fetch if we already detected EOF, though. */
-		/* KITE */
 		if (!fsstate->eof_reached)
 			fetch_more_data(node);
-
 		/* If we didn't get any tuples, must be end of data. */
 		if (fsstate->next_tuple >= fsstate->num_tuples)
 			return ExecClearTuple(slot);
@@ -1079,8 +1470,8 @@ kiteIterateForeignScan(ForeignScanState *node) {
 	 * Return the next tuple.
 	 */
 	ExecStoreHeapTuple(fsstate->tuples[fsstate->next_tuple++],
-		slot,
-		false);
+					   slot,
+					   false);
 
 	return slot;
 }
@@ -1090,7 +1481,8 @@ kiteIterateForeignScan(ForeignScanState *node) {
  *		Restart the scan.
  */
 static void
-kiteReScanForeignScan(ForeignScanState *node) {
+kiteReScanForeignScan(ForeignScanState *node)
+{
 	/* KITE already disable Param so ReScan do nothing even Postgres get this function */
 	return;
 }
@@ -1100,13 +1492,15 @@ kiteReScanForeignScan(ForeignScanState *node) {
  *		Finish scanning foreign table and dispose objects used for this scan
  */
 static void
-kiteEndForeignScan(ForeignScanState *node) {
-	PgFdwScanState *fsstate = (PgFdwScanState *)node->fdw_state;
+kiteEndForeignScan(ForeignScanState *node)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
 
 	/* if fsstate is NULL, we are in EXPLAIN; nothing to do */
 	if (fsstate == NULL)
 		return;
 
+	/* Release remote connection */
 	ReleaseConnection(fsstate->req);
 	fsstate->req = NULL;
 
@@ -1114,14 +1508,49 @@ kiteEndForeignScan(ForeignScanState *node) {
 		xrg_agg_destroy(fsstate->agg);
 		fsstate->agg = 0;
 	}
-	
+
 	if (fsstate->partial_agg) {
 		xrg_agg_p_destroy(fsstate->partial_agg);
 		fsstate->partial_agg = 0;
 	}
-
 	/* MemoryContexts will be deleted automatically. */
 }
+
+/*
+ * kiteExplainForeignScan
+ *		Produce extra output for EXPLAIN of a ForeignScan on a foreign table
+ */
+static void
+kiteExplainForeignScan(ForeignScanState *node, ExplainState *es)
+{
+	List	   *fdw_private;
+	char	   *sql;
+	char	   *relations;
+
+	elog(LOG, "Explain Foreign Scan..................KITE");
+
+	fdw_private = ((ForeignScan *) node->ss.ps.plan)->fdw_private;
+
+	/*
+	 * Add names of relation handled by the foreign scan when the scan is a
+	 * join
+	 */
+	if (list_length(fdw_private) > FdwScanPrivateRelations)
+	{
+		relations = strVal(list_nth(fdw_private, FdwScanPrivateRelations));
+		ExplainPropertyText("Relations", relations, es);
+	}
+
+	/*
+	 * Add remote query, when VERBOSE option is specified.
+	 */
+	if (es->verbose)
+	{
+		sql = strVal(list_nth(fdw_private, FdwScanPrivateSelectSql));
+		ExplainPropertyText("Remote SQL", sql, es);
+	}
+}
+
 
 /*
  * estimate_path_cost_size
@@ -1139,18 +1568,19 @@ kiteEndForeignScan(ForeignScanState *node) {
  */
 static void
 estimate_path_cost_size(PlannerInfo *root,
-	RelOptInfo *foreignrel,
-	List *param_join_conds,
-	List *pathkeys,
-	PgFdwPathExtraData *fpextra,
-	double *p_rows, int *p_width,
-	Cost *p_startup_cost, Cost *p_total_cost) {
-	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *)foreignrel->fdw_private;
-	double rows;
-	double retrieved_rows;
-	int width;
-	Cost startup_cost;
-	Cost total_cost;
+						RelOptInfo *foreignrel,
+						List *param_join_conds,
+						List *pathkeys,
+						PgFdwPathExtraData *fpextra,
+						double *p_rows, int *p_width,
+						Cost *p_startup_cost, Cost *p_total_cost)
+{
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) foreignrel->fdw_private;
+	double		rows;
+	double		retrieved_rows;
+	int			width;
+	Cost		startup_cost;
+	Cost		total_cost;
 
 	/* Make sure the core code has set up the relation's reltarget */
 	Assert(foreignrel->reltarget);
@@ -1162,20 +1592,19 @@ estimate_path_cost_size(PlannerInfo *root,
 	 * estimate rows using whatever statistics we have locally, in a way
 	 * similar to ordinary tables.
 	 */
-	if (fpinfo->use_remote_estimate) {
-		List *remote_param_join_conds;
-		List *local_param_join_conds;
+	if (fpinfo->use_remote_estimate)
+	{
+		List	   *remote_param_join_conds;
+		List	   *local_param_join_conds;
 		StringInfoData sql;
-		/* KITE */
-		kite_request_t *req;
-
 		Selectivity local_sel;
-		QualCost local_cost;
-		List *fdw_scan_tlist = NIL;
-		List *remote_conds;
+		QualCost	local_cost;
+		List	   *fdw_scan_tlist = NIL;
+		List	   *remote_conds;
 
+		/* KITE: required only to be passed to deparseSelectStmtForRel */
 		/* Required only to be passed to deparseSelectStmtForRel */
-		List *retrieved_attrs;
+		List	   *retrieved_attrs;
 		List *retrieved_aggfnoids;
 		List *retrieved_groupby_attrs;
 
@@ -1184,7 +1613,7 @@ estimate_path_cost_size(PlannerInfo *root,
 		 * across, and clauses that aren't.
 		 */
 		classifyConditions(root, foreignrel, param_join_conds,
-			&remote_param_join_conds, &local_param_join_conds);
+						   &remote_param_join_conds, &local_param_join_conds);
 
 		/* Build the list of columns to be fetched from the foreign server. */
 		if (IS_JOIN_REL(foreignrel) || IS_UPPER_REL(foreignrel))
@@ -1197,8 +1626,8 @@ estimate_path_cost_size(PlannerInfo *root,
 		 * baserestrictinfo plus any extra join_conds relevant to this
 		 * particular path.
 		 */
-		remote_conds = list_concat(remote_param_join_conds,
-			fpinfo->remote_conds);
+		remote_conds = list_concat(list_copy(remote_param_join_conds),
+								   fpinfo->remote_conds);
 
 		/*
 		 * Construct EXPLAIN query including the desired SELECT, FROM, and
@@ -1208,11 +1637,11 @@ estimate_path_cost_size(PlannerInfo *root,
 		initStringInfo(&sql);
 		appendStringInfoString(&sql, "EXPLAIN ");
 		deparseSelectStmtForRel(&sql, root, foreignrel, fdw_scan_tlist,
-			remote_conds, pathkeys,
-			fpextra ? fpextra->has_final_sort : false,
-			fpextra ? fpextra->has_limit : false,
-			false, &retrieved_attrs, NULL, &retrieved_aggfnoids,
-			&retrieved_groupby_attrs);
+								remote_conds, pathkeys,
+								fpextra ? fpextra->has_final_sort : false,
+								fpextra ? fpextra->has_limit : false,
+								false, &retrieved_attrs, NULL,
+								&retrieved_aggfnoids, &retrieved_groupby_attrs);
 
 		/* Get the remote estimate */
 		/* KITE */
@@ -1220,16 +1649,15 @@ estimate_path_cost_size(PlannerInfo *root,
 		width = 0;
 		startup_cost = 0;
 		total_cost = 0;
-		/* END KITE */
 
 		retrieved_rows = rows;
 
 		/* Factor in the selectivity of the locally-checked quals */
 		local_sel = clauselist_selectivity(root,
-			local_param_join_conds,
-			foreignrel->relid,
-			JOIN_INNER,
-			NULL);
+										   local_param_join_conds,
+										   foreignrel->relid,
+										   JOIN_INNER,
+										   NULL);
 		local_sel *= fpinfo->local_conds_sel;
 
 		rows = clamp_row_est(rows * local_sel);
@@ -1249,16 +1677,19 @@ estimate_path_cost_size(PlannerInfo *root,
 		startup_cost += foreignrel->reltarget->cost.startup;
 		total_cost += foreignrel->reltarget->cost.startup;
 		total_cost += foreignrel->reltarget->cost.per_tuple * rows;
-		if (IS_UPPER_REL(foreignrel)) {
-			QualCost tlist_cost;
+		if (IS_UPPER_REL(foreignrel))
+		{
+			QualCost	tlist_cost;
 
 			cost_qual_eval(&tlist_cost, fdw_scan_tlist, root);
 			startup_cost -= tlist_cost.startup;
 			total_cost -= tlist_cost.startup;
 			total_cost -= tlist_cost.per_tuple * rows;
 		}
-	} else {
-		Cost run_cost = 0;
+	}
+	else
+	{
+		Cost		run_cost = 0;
 
 		/*
 		 * We don't support join conditions in this mode (hence, no
@@ -1273,8 +1704,9 @@ estimate_path_cost_size(PlannerInfo *root,
 		 * underlying scan, join, or grouping each time.  Instead, use those
 		 * estimates if we have cached them already.
 		 */
-		if (fpinfo->rel_startup_cost >= 0 && fpinfo->rel_total_cost >= 0) {
-			Assert(fpinfo->retrieved_rows >= 0);
+		if (fpinfo->rel_startup_cost >= 0 && fpinfo->rel_total_cost >= 0)
+		{
+			Assert(fpinfo->retrieved_rows >= 1);
 
 			rows = fpinfo->rows;
 			retrieved_rows = fpinfo->retrieved_rows;
@@ -1290,7 +1722,8 @@ estimate_path_cost_size(PlannerInfo *root,
 			 * updated by apply_scanjoin_target_to_paths(); add the eval costs
 			 * now.
 			 */
-			if (fpextra && !IS_UPPER_REL(foreignrel)) {
+			if (fpextra && !IS_UPPER_REL(foreignrel))
+			{
 				/* Shouldn't get here unless we have LIMIT */
 				Assert(fpextra->has_limit);
 				Assert(foreignrel->reloptkind == RELOPT_BASEREL ||
@@ -1298,12 +1731,14 @@ estimate_path_cost_size(PlannerInfo *root,
 				startup_cost += foreignrel->reltarget->cost.startup;
 				run_cost += foreignrel->reltarget->cost.per_tuple * rows;
 			}
-		} else if (IS_JOIN_REL(foreignrel)) {
+		}
+		else if (IS_JOIN_REL(foreignrel))
+		{
 			PgFdwRelationInfo *fpinfo_i;
 			PgFdwRelationInfo *fpinfo_o;
-			QualCost join_cost;
-			QualCost remote_conds_cost;
-			double nrows;
+			QualCost	join_cost;
+			QualCost	remote_conds_cost;
+			double		nrows;
 
 			/* Use rows/width estimates made by the core code. */
 			rows = foreignrel->rows;
@@ -1312,15 +1747,15 @@ estimate_path_cost_size(PlannerInfo *root,
 			/* For join we expect inner and outer relations set */
 			Assert(fpinfo->innerrel && fpinfo->outerrel);
 
-			fpinfo_i = (PgFdwRelationInfo *)fpinfo->innerrel->fdw_private;
-			fpinfo_o = (PgFdwRelationInfo *)fpinfo->outerrel->fdw_private;
+			fpinfo_i = (PgFdwRelationInfo *) fpinfo->innerrel->fdw_private;
+			fpinfo_o = (PgFdwRelationInfo *) fpinfo->outerrel->fdw_private;
 
 			/* Estimate of number of rows in cross product */
 			nrows = fpinfo_i->rows * fpinfo_o->rows;
 
 			/*
 			 * Back into an estimate of the number of retrieved rows.  Just in
-			 * case this is nuts, clamp to at most nrows.
+			 * case this is nuts, clamp to at most nrow.
 			 */
 			retrieved_rows = clamp_row_est(rows / fpinfo->local_conds_sel);
 			retrieved_rows = Min(retrieved_rows, nrows);
@@ -1375,13 +1810,15 @@ estimate_path_cost_size(PlannerInfo *root,
 			/* Add in tlist eval cost for each output row */
 			startup_cost += foreignrel->reltarget->cost.startup;
 			run_cost += foreignrel->reltarget->cost.per_tuple * rows;
-		} else if (IS_UPPER_REL(foreignrel)) {
+		}
+		else if (IS_UPPER_REL(foreignrel))
+		{
 			RelOptInfo *outerrel = fpinfo->outerrel;
 			PgFdwRelationInfo *ofpinfo;
 			AggClauseCosts aggcosts;
-			double input_rows;
-			int numGroupCols;
-			double numGroups = 1;
+			double		input_rows;
+			int			numGroupCols;
+			double		numGroups = 1;
 
 			/* The upper relation should have its outer relation set */
 			Assert(outerrel);
@@ -1396,49 +1833,53 @@ estimate_path_cost_size(PlannerInfo *root,
 			 * and all finalization and run cost are added in total_cost.
 			 */
 
-			ofpinfo = (PgFdwRelationInfo *)outerrel->fdw_private;
+			ofpinfo = (PgFdwRelationInfo *) outerrel->fdw_private;
 
 			/* Get rows from input rel */
 			input_rows = ofpinfo->rows;
 
 			/* Collect statistics about aggregates for estimating costs. */
 			MemSet(&aggcosts, 0, sizeof(AggClauseCosts));
-			if (root->parse->hasAggs) {
+			if (root->parse->hasAggs)
+			{
 				get_agg_clause_costs(root, (Node *) fpinfo->grouped_tlist,
-									AGGSPLIT_SIMPLE, &aggcosts);
+									 AGGSPLIT_SIMPLE, &aggcosts);
 
-                                /*
-                                 * The cost of aggregates in the HAVING qual will be the same
-                                 * for each child as it is for the parent, so there's no need
-                                 * to use a translated version of havingQual.
-                                 */
-                                get_agg_clause_costs(root, (Node *) root->parse->havingQual,
-                                                                         AGGSPLIT_SIMPLE, &aggcosts);
+				/*
+				 * The cost of aggregates in the HAVING qual will be the same
+				 * for each child as it is for the parent, so there's no need
+				 * to use a translated version of havingQual.
+				 */
+				get_agg_clause_costs(root, (Node *) root->parse->havingQual,
+									 AGGSPLIT_SIMPLE, &aggcosts);
 			}
 
 			/* Get number of grouping columns and possible number of groups */
 			numGroupCols = list_length(root->parse->groupClause);
 			numGroups = estimate_num_groups(root,
-				get_sortgrouplist_exprs(root->parse->groupClause,
-					fpinfo->grouped_tlist),
-				input_rows, NULL);
+											get_sortgrouplist_exprs(root->parse->groupClause,
+																	fpinfo->grouped_tlist),
+											input_rows, NULL);
 
 			/*
 			 * Get the retrieved_rows and rows estimates.  If there are HAVING
 			 * quals, account for their selectivity.
 			 */
-			if (root->parse->havingQual) {
+			if (root->parse->havingQual)
+			{
 				/* Factor in the selectivity of the remotely-checked quals */
 				retrieved_rows =
 					clamp_row_est(numGroups *
 								  clauselist_selectivity(root,
-									  fpinfo->remote_conds,
-									  0,
-									  JOIN_INNER,
-									  NULL));
+														 fpinfo->remote_conds,
+														 0,
+														 JOIN_INNER,
+														 NULL));
 				/* Factor in the selectivity of the locally-checked quals */
 				rows = clamp_row_est(retrieved_rows * fpinfo->local_conds_sel);
-			} else {
+			}
+			else
+			{
 				rows = retrieved_rows = numGroups;
 			}
 
@@ -1472,8 +1913,9 @@ estimate_path_cost_size(PlannerInfo *root,
 			run_cost += cpu_tuple_cost * numGroups;
 
 			/* Account for the eval cost of HAVING quals, if any */
-			if (root->parse->havingQual) {
-				QualCost remote_cost;
+			if (root->parse->havingQual)
+			{
+				QualCost	remote_cost;
 
 				/* Add in the eval cost of the remotely-checked quals */
 				cost_qual_eval(&remote_cost, fpinfo->remote_conds, root);
@@ -1487,8 +1929,10 @@ estimate_path_cost_size(PlannerInfo *root,
 			/* Add in tlist eval cost for each output row */
 			startup_cost += foreignrel->reltarget->cost.startup;
 			run_cost += foreignrel->reltarget->cost.per_tuple * rows;
-		} else {
-			Cost cpu_per_tuple;
+		}
+		else
+		{
+			Cost		cpu_per_tuple;
 
 			/* Use rows/width estimates made by set_baserel_size_estimates. */
 			rows = foreignrel->rows;
@@ -1528,15 +1972,19 @@ estimate_path_cost_size(PlannerInfo *root,
 		 * isn't locally useful, but low enough that we'll err on the side of
 		 * pushing down the ORDER BY clause when it's useful to do so.
 		 */
-		if (pathkeys != NIL) {
-			if (IS_UPPER_REL(foreignrel)) {
+		if (pathkeys != NIL)
+		{
+			if (IS_UPPER_REL(foreignrel))
+			{
 				Assert(foreignrel->reloptkind == RELOPT_UPPER_REL &&
 					   fpinfo->stage == UPPERREL_GROUP_AGG);
 				adjust_foreign_grouping_path_cost(root, pathkeys,
-					retrieved_rows, width,
-					fpextra->limit_tuples,
-					&startup_cost, &run_cost);
-			} else {
+												  retrieved_rows, width,
+												  fpextra->limit_tuples,
+												  &startup_cost, &run_cost);
+			}
+			else
+			{
 				startup_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
 				run_cost *= DEFAULT_FDW_SORT_MULTIPLIER;
 			}
@@ -1545,9 +1993,10 @@ estimate_path_cost_size(PlannerInfo *root,
 		total_cost = startup_cost + run_cost;
 
 		/* Adjust the cost estimates if we have LIMIT */
-		if (fpextra && fpextra->has_limit) {
+		if (fpextra && fpextra->has_limit)
+		{
 			adjust_limit_rows_costs(&rows, &startup_cost, &total_cost,
-				fpextra->offset_est, fpextra->count_est);
+									fpextra->offset_est, fpextra->count_est);
 			retrieved_rows = rows;
 		}
 	}
@@ -1559,9 +2008,10 @@ estimate_path_cost_size(PlannerInfo *root,
 	 * eval costs.
 	 */
 	if (fpextra && fpextra->has_final_sort &&
-		fpextra->target != foreignrel->reltarget) {
-		QualCost oldcost = foreignrel->reltarget->cost;
-		QualCost newcost = fpextra->target->cost;
+		fpextra->target != foreignrel->reltarget)
+	{
+		QualCost	oldcost = foreignrel->reltarget->cost;
+		QualCost	newcost = fpextra->target->cost;
 
 		startup_cost += newcost.startup - oldcost.startup;
 		total_cost += newcost.startup - oldcost.startup;
@@ -1580,7 +2030,8 @@ estimate_path_cost_size(PlannerInfo *root,
 	 * relation without any parameterization, pathkeys, or additional
 	 * post-scan/join-processing steps.
 	 */
-	if (pathkeys == NIL && param_join_conds == NIL && fpextra == NULL) {
+	if (pathkeys == NIL && param_join_conds == NIL && fpextra == NULL)
+	{
 		fpinfo->retrieved_rows = retrieved_rows;
 		fpinfo->rel_startup_cost = startup_cost;
 		fpinfo->rel_total_cost = total_cost;
@@ -1614,10 +2065,11 @@ estimate_path_cost_size(PlannerInfo *root,
 	if (!fpinfo->use_remote_estimate &&
 		fpextra && fpextra->has_limit &&
 		fpextra->limit_tuples > 0 &&
-		fpextra->limit_tuples < fpinfo->rows) {
+		fpextra->limit_tuples < fpinfo->rows)
+	{
 		Assert(fpinfo->rows > 0);
 		total_cost -= (total_cost - startup_cost) * 0.05 *
-					  (fpinfo->rows - fpextra->limit_tuples) / fpinfo->rows;
+			(fpinfo->rows - fpextra->limit_tuples) / fpinfo->rows;
 	}
 
 	/* Return results. */
@@ -1633,12 +2085,13 @@ estimate_path_cost_size(PlannerInfo *root,
  */
 static void
 adjust_foreign_grouping_path_cost(PlannerInfo *root,
-	List *pathkeys,
-	double retrieved_rows,
-	double width,
-	double limit_tuples,
-	Cost *p_startup_cost,
-	Cost *p_run_cost) {
+								  List *pathkeys,
+								  double retrieved_rows,
+								  double width,
+								  double limit_tuples,
+								  Cost *p_startup_cost,
+								  Cost *p_run_cost)
+{
 	/*
 	 * If the GROUP BY clause isn't sort-able, the plan chosen by the remote
 	 * side is unlikely to generate properly-sorted output, so it would need
@@ -1648,27 +2101,31 @@ adjust_foreign_grouping_path_cost(PlannerInfo *root,
 	 * costs by applying the same heuristic as for the scan or join case.
 	 */
 	if (!grouping_is_sortable(root->parse->groupClause) ||
-		!pathkeys_contained_in(pathkeys, root->group_pathkeys)) {
-		Path sort_path; /* dummy for result of cost_sort */
+		!pathkeys_contained_in(pathkeys, root->group_pathkeys))
+	{
+		Path		sort_path;	/* dummy for result of cost_sort */
 
 		cost_sort(&sort_path,
-			root,
-			pathkeys,
-			*p_startup_cost + *p_run_cost,
-			retrieved_rows,
-			width,
-			0.0,
-			work_mem,
-			limit_tuples);
+				  root,
+				  pathkeys,
+				  *p_startup_cost + *p_run_cost,
+				  retrieved_rows,
+				  width,
+				  0.0,
+				  work_mem,
+				  limit_tuples);
 
 		*p_startup_cost = sort_path.startup_cost;
 		*p_run_cost = sort_path.total_cost - sort_path.startup_cost;
-	} else {
+	}
+	else
+	{
 		/*
 		 * The default extra cost seems too large for foreign-grouping cases;
 		 * add 1/4th of that default.
 		 */
-		double sort_multiplier = 1.0 + (DEFAULT_FDW_SORT_MULTIPLIER - 1.0) * 0.25;
+		double		sort_multiplier = 1.0 + (DEFAULT_FDW_SORT_MULTIPLIER
+											 - 1.0) * 0.25;
 
 		*p_startup_cost *= sort_multiplier;
 		*p_run_cost *= sort_multiplier;
@@ -1676,13 +2133,45 @@ adjust_foreign_grouping_path_cost(PlannerInfo *root,
 }
 
 /*
+ * Detect whether we want to process an EquivalenceClass member.
+ *
+ * This is a callback for use by generate_implied_equalities_for_column.
+ */
+static bool
+ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
+						  EquivalenceClass *ec, EquivalenceMember *em,
+						  void *arg)
+{
+	ec_member_foreign_arg *state = (ec_member_foreign_arg *) arg;
+	Expr	   *expr = em->em_expr;
+
+	/*
+	 * If we've identified what we're processing in the current scan, we only
+	 * want to match that expression.
+	 */
+	if (state->current != NULL)
+		return equal(expr, state->current);
+
+	/*
+	 * Otherwise, ignore anything we've already processed.
+	 */
+	if (list_member(state->already_used, expr))
+		return false;
+
+	/* This is the new target to process. */
+	state->current = expr;
+	return true;
+}
+
+/*
  * Create cursor for node's query with current parameter values.
  */
 static void
-create_cursor(ForeignScanState *node) {
-	PgFdwScanState *fsstate = (PgFdwScanState *)node->fdw_state;
+create_cursor(ForeignScanState *node)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
-	int numParams = fsstate->numParams;
+	int			numParams = fsstate->numParams;
 	const char **values = fsstate->param_values;
 	kite_request_t *req = fsstate->req;
 	char errmsg[1024];
@@ -1692,33 +2181,22 @@ create_cursor(ForeignScanState *node) {
 	 * conversions in the short-lived per-tuple context, so as not to cause a
 	 * memory leak over repeated scans.
 	 */
-	if (numParams > 0) {
+	if (numParams > 0)
+	{
 		MemoryContext oldcontext;
 
 		oldcontext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
 
 		process_query_params(econtext,
-			fsstate->param_flinfo,
-			fsstate->param_exprs,
-			values);
+							 fsstate->param_flinfo,
+							 fsstate->param_exprs,
+							 values);
 
 		MemoryContextSwitchTo(oldcontext);
 	}
 
-	/* fragid is greater than fragcnt.  No need to fetch data on this QE */
-	if (fsstate->fragid >= fsstate->fragcnt) {
-		req->hdl = NULL;
-		fsstate->cursor_exists = true;
-		fsstate->tuples = NULL;
-		fsstate->num_tuples = 0;
-		fsstate->next_tuple = 0;
-		fsstate->fetch_ct_2 = 0;
-		fsstate->eof_reached = true;
-		return;
-	}
-
 	/* kite_submit */
-	req->hdl = kite_submit(req->host, fsstate->schema, fsstate->query, fsstate->fragid, fsstate->fragcnt, fsstate->fspec, errmsg, sizeof(errmsg));
+	req->hdl = kite_submit(req->host, fsstate->schema, fsstate->query, -1, fsstate->fragcnt, fsstate->fspec, errmsg, sizeof(errmsg));
 	if (!req->hdl) {
 		elog(ERROR, "kite_submit failed");
 		return;
@@ -1731,14 +2209,16 @@ create_cursor(ForeignScanState *node) {
 	fsstate->next_tuple = 0;
 	fsstate->fetch_ct_2 = 0;
 	fsstate->eof_reached = false;
+
 }
 
 /*
  * Fetch some more rows from the node's cursor.
  */
 static void
-fetch_more_data(ForeignScanState *node) {
-	PgFdwScanState *fsstate = (PgFdwScanState *)node->fdw_state;
+fetch_more_data(ForeignScanState *node)
+{
+	PgFdwScanState *fsstate = (PgFdwScanState *) node->fdw_state;
 	char errmsg[1024];
 	MemoryContext oldcontext;
 
@@ -1803,7 +2283,7 @@ fetch_more_data(ForeignScanState *node) {
 						fsstate->eof_reached = true;
 						break;
 					}
-					
+
 					if (fsstate->partial_agg) {
 						fsstate->tuples[i] = make_tuple_from_partial_agg(fsstate->partial_agg, 
 							iter,
@@ -1868,33 +2348,35 @@ fetch_more_data(ForeignScanState *node) {
  * The return value is the nestlevel that must be passed to
  * reset_transmission_modes() to undo things.
  */
-int set_transmission_modes(void) {
-	int nestlevel = NewGUCNestLevel();
+int
+set_transmission_modes(void)
+{
+	int			nestlevel = NewGUCNestLevel();
 
 	/*
 	 * The values set here should match what pg_dump does.  See also
 	 * configure_remote_session in connection.c.
 	 */
 	if (DateStyle != USE_ISO_DATES)
-		(void)set_config_option("datestyle", "ISO",
-			PGC_USERSET, PGC_S_SESSION,
-			GUC_ACTION_SAVE, true, 0, false);
+		(void) set_config_option("datestyle", "ISO",
+								 PGC_USERSET, PGC_S_SESSION,
+								 GUC_ACTION_SAVE, true, 0, false);
 	if (IntervalStyle != INTSTYLE_POSTGRES)
-		(void)set_config_option("intervalstyle", "postgres",
-			PGC_USERSET, PGC_S_SESSION,
-			GUC_ACTION_SAVE, true, 0, false);
+		(void) set_config_option("intervalstyle", "postgres",
+								 PGC_USERSET, PGC_S_SESSION,
+								 GUC_ACTION_SAVE, true, 0, false);
 	if (extra_float_digits < 3)
-		(void)set_config_option("extra_float_digits", "3",
-			PGC_USERSET, PGC_S_SESSION,
-			GUC_ACTION_SAVE, true, 0, false);
+		(void) set_config_option("extra_float_digits", "3",
+								 PGC_USERSET, PGC_S_SESSION,
+								 GUC_ACTION_SAVE, true, 0, false);
 
 	/*
 	 * In addition force restrictive search_path, in case there are any
 	 * regproc or similar constants to be printed.
 	 */
-	(void)set_config_option("search_path", "pg_catalog",
-		PGC_USERSET, PGC_S_SESSION,
-		GUC_ACTION_SAVE, true, 0, false);
+	(void) set_config_option("search_path", "pg_catalog",
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
 
 	return nestlevel;
 }
@@ -1902,51 +2384,10 @@ int set_transmission_modes(void) {
 /*
  * Undo the effects of set_transmission_modes().
  */
-void reset_transmission_modes(int nestlevel) {
+void
+reset_transmission_modes(int nestlevel)
+{
 	AtEOXact_GUC(true, nestlevel);
-}
-
-/*
- * Prepare for processing of parameters used in remote query.
- */
-static void
-prepare_query_params(PlanState *node,
-	List *fdw_exprs,
-	int numParams,
-	FmgrInfo **param_flinfo,
-	List **param_exprs,
-	const char ***param_values) {
-	int i;
-	ListCell *lc;
-
-	Assert(numParams > 0);
-
-	/* Prepare for output conversion of parameters used in remote query. */
-	*param_flinfo = (FmgrInfo *)palloc0(sizeof(FmgrInfo) * numParams);
-
-	i = 0;
-	foreach (lc, fdw_exprs) {
-		Node *param_expr = (Node *)lfirst(lc);
-		Oid typefnoid;
-		bool isvarlena;
-
-		getTypeOutputInfo(exprType(param_expr), &typefnoid, &isvarlena);
-		fmgr_info(typefnoid, &(*param_flinfo)[i]);
-		i++;
-	}
-
-	/*
-	 * Prepare remote-parameter expressions for evaluation.  (Note: in
-	 * practice, we expect that all these expressions will be just Params, so
-	 * we could possibly do something more efficient than using the full
-	 * expression-eval machinery for this.  But probably there would be little
-	 * benefit, and it'd require kite_fdw to know more than is desirable
-	 * about Param evaluation.)
-	 */
-	*param_exprs = ExecInitExprList(fdw_exprs, node);
-
-	/* Allocate buffer for text form of query parameters. */
-	*param_values = (const char **)palloc0(numParams * sizeof(char *));
 }
 
 /*
@@ -1954,20 +2395,22 @@ prepare_query_params(PlanState *node,
  */
 static void
 process_query_params(ExprContext *econtext,
-	FmgrInfo *param_flinfo,
-	List *param_exprs,
-	const char **param_values) {
-	int nestlevel;
-	int i;
-	ListCell *lc;
+					 FmgrInfo *param_flinfo,
+					 List *param_exprs,
+					 const char **param_values)
+{
+	int			nestlevel;
+	int			i;
+	ListCell   *lc;
 
 	nestlevel = set_transmission_modes();
 
 	i = 0;
-	foreach (lc, param_exprs) {
-		ExprState *expr_state = (ExprState *)lfirst(lc);
-		Datum expr_value;
-		bool isNull;
+	foreach(lc, param_exprs)
+	{
+		ExprState  *expr_state = (ExprState *) lfirst(lc);
+		Datum		expr_value;
+		bool		isNull;
 
 		/* Evaluate the parameter expression */
 		expr_value = ExecEvalExpr(expr_state, econtext, &isNull);
@@ -1988,32 +2431,286 @@ process_query_params(ExprContext *econtext,
 }
 
 /*
+ * kiteAnalyzeForeignTable
+ *		Test whether analyzing this foreign table is supported
+ */
+static bool
+kiteAnalyzeForeignTable(Relation relation,
+							AcquireSampleRowsFunc *func,
+							BlockNumber *totalpages)
+{
+	double totalrows = 0;
+
+	/* Return the row-analysis function pointer */
+	*func = kiteAcquireSampleRowsFunc;
+
+	//return kite_get_relation_stats(relation, totalpages, &totalrows);
+	// give fake number and get the stats in the later stage
+	*totalpages = 100;
+
+	return true;
+}
+
+/*
+ * Acquire a random sample of rows from foreign table managed by kite_fdw.
+ *
+ * We fetch the whole table from the remote side and pick out some sample rows.
+ *
+ * Selected rows are returned in the caller-allocated array rows[],
+ * which must have at least targrows entries.
+ * The actual number of rows selected is returned as the function result.
+ * We also count the total number of rows in the table and return it into
+ * *totalrows.  Note that *totaldeadrows is always set to 0.
+ *
+ * Note that the returned list of rows is not always in order by physical
+ * position in the table.  Therefore, correlation estimates derived later
+ * may be meaningless, but it's OK because we don't use the estimates
+ * currently (the planner only pays attention to correlation for indexscans).
+ */
+static int
+kiteAcquireSampleRowsFunc(Relation relation, int elevel,
+							  HeapTuple *rows, int targrows,
+							  double *totalrows,
+							  double *totaldeadrows)
+{
+	PgFdwAnalyzeState astate;
+	PgFdwRelationInfo *fpinfo;
+	char errormsg[1024];
+	ForeignTable *table;
+	UserMapping *user;
+	kite_request_t *req;
+	StringInfoData sql, schema;
+	List *retrieved_attrs;
+	BlockNumber totalpages = 0;
+	xrg_iter_t *iter = 0;
+	int e = 0;
+	MemoryContext oldcontext;
+	kite_filespec_t *fspec;
+
+	astate.rel = relation;
+	astate.attinmeta = TupleDescGetAttInMetadata(RelationGetDescr(relation));
+	astate.rows = rows;
+	astate.targrows = targrows;
+	astate.numrows = 0;
+	astate.samplerows = 0;
+
+	fpinfo = (PgFdwRelationInfo *)palloc0(sizeof(PgFdwRelationInfo));
+	/* Look up foreign-table catalog info. */
+	fpinfo->table = GetForeignTable(relation->rd_id);
+	fpinfo->server = GetForeignServer(fpinfo->table->serverid);
+
+	fpinfo->fragcnt = 1;
+	fpinfo->csv_delim = ',';
+	fpinfo->csv_quote = '"';
+	fpinfo->csv_escape = '"';
+	fpinfo->csv_nullstr = 0;
+	fpinfo->csv_header = false;
+	apply_server_options(fpinfo);
+	apply_table_options(fpinfo);
+
+        /*
+         * build filespec for KITE
+         */
+        fspec = (kite_filespec_t*) palloc0(sizeof(kite_filespec_t));
+        if (! fpinfo->fmt) {
+                elog(ERROR, "table option fmt is not specified");
+        }
+
+        strcpy(fspec->fmt, fpinfo->fmt);
+        fspec->u.csv.delim = fpinfo->csv_delim;
+        fspec->u.csv.quote = fpinfo->csv_quote;
+        fspec->u.csv.escape = fpinfo->csv_escape;
+        if (fpinfo->csv_nullstr) {
+                strcpy(fspec->u.csv.nullstr, fpinfo->csv_nullstr);
+        } else {
+                *fspec->u.csv.nullstr = 0;
+        }
+        fspec->u.csv.header_line = fpinfo->csv_header;
+
+
+	if (!kite_get_relation_stats(fpinfo, relation, fspec, &totalpages, &astate.samplerows)) {
+		elog(ERROR, "kite_Get_relation_stats failed");
+		return 0;
+	}
+
+	/* Remember ANALYZE context, and create a per-tuple temp context */
+	astate.anl_cxt = CurrentMemoryContext;
+	astate.temp_cxt = AllocSetContextCreate(CurrentMemoryContext,
+		"kite_fdw temporary data",
+		ALLOCSET_SMALL_SIZES);
+
+	/*
+	 * Get the connection to use.  We do the remote access as the table's
+	 * owner, even if the ANALYZE was started by some other user.
+	 */
+	table = GetForeignTable(RelationGetRelid(relation));
+	user = GetUserMapping(relation->rd_rel->relowner, table->serverid);
+	req = GetConnection(user, false);
+
+	/*
+	 * Construct command to get page count for relation.
+	 */
+	retrieved_attrs = NULL;
+	initStringInfo(&sql);
+	deparseAnalyzeSql(&sql, relation, &retrieved_attrs, targrows, *totalrows);
+
+	/*
+         * build the schema for KITE
+	 */
+	{
+		TupleDesc tupdesc = RelationGetDescr(relation);
+		initStringInfo(&schema);
+		kite_build_schema(&schema, tupdesc);
+	}
+
+	req->hdl = kite_submit(req->host, schema.data, sql.data, -1, fpinfo->fragcnt, fspec, errormsg, sizeof(errormsg));
+	if (!req->hdl) {
+		elog(ERROR, "kite_submit failed -- %s", errormsg);
+		return 0;
+	}
+
+	PG_TRY();
+	{
+
+		oldcontext = MemoryContextSwitchTo(astate.anl_cxt);
+		for (int i = 0; i < targrows; i++) {
+
+			e = kite_next_row(req->hdl, &iter, errormsg, sizeof(errormsg));
+			if (e == 0) {
+				if (iter == 0) {
+					break;
+				}
+
+				rows[i] = make_tuple_from_result_row(iter,
+					i,
+					astate.rel,
+					astate.attinmeta,
+					retrieved_attrs,
+					NULL,
+					astate.temp_cxt);
+
+				astate.numrows++;
+			} else {
+				elog(ERROR, "kite_next_row failed");
+			}
+		}
+		MemoryContextSwitchTo(oldcontext);
+
+		elog(LOG, "Analyze sample received %d rows, targrows =%d", astate.numrows, astate.targrows);
+	}
+	PG_CATCH();
+	{
+		ReleaseConnection(req);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	ReleaseConnection(req);
+
+	/* We assume that we have no dead tuple */
+	*totaldeadrows = 0;
+
+	/* We've retrieved total number of rows from foreign server */
+	*totalrows = astate.samplerows;
+
+	/*
+	 * Emit some interesting relation info
+	 */
+	ereport(elevel,
+		(errmsg("\"%s\": table contains %.0f rows, %d rows in sample",
+			RelationGetRelationName(relation),
+			astate.samplerows, astate.numrows)));
+
+	return astate.numrows;
+}
+
+static void
+add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
+								Path *epq_path)
+{
+	List	   *useful_pathkeys_list = NIL; /* List of all pathkeys */
+	ListCell   *lc;
+
+	useful_pathkeys_list = get_useful_pathkeys_for_relation(root, rel);
+
+	/* Create one path for each set of pathkeys we found above. */
+	foreach(lc, useful_pathkeys_list)
+	{
+		double		rows;
+		int			width;
+		Cost		startup_cost;
+		Cost		total_cost;
+		List	   *useful_pathkeys = lfirst(lc);
+		Path	   *sorted_epq_path;
+
+		estimate_path_cost_size(root, rel, NIL, useful_pathkeys, NULL,
+								&rows, &width, &startup_cost, &total_cost);
+
+		/*
+		 * The EPQ path must be at least as well sorted as the path itself, in
+		 * case it gets used as input to a mergejoin.
+		 */
+		sorted_epq_path = epq_path;
+		if (sorted_epq_path != NULL &&
+			!pathkeys_contained_in(useful_pathkeys,
+								   sorted_epq_path->pathkeys))
+			sorted_epq_path = (Path *)
+				create_sort_path(root,
+								 rel,
+								 sorted_epq_path,
+								 useful_pathkeys,
+								 -1.0);
+
+		if (IS_SIMPLE_REL(rel))
+			add_path(rel, (Path *)
+					 create_foreignscan_path(root, rel,
+											 NULL,
+											 rows,
+											 startup_cost,
+											 total_cost,
+											 useful_pathkeys,
+											 rel->lateral_relids,
+											 sorted_epq_path,
+											 NIL));
+		else
+			add_path(rel, (Path *)
+					 create_foreign_join_path(root, rel,
+											  NULL,
+											  rows,
+											  startup_cost,
+											  total_cost,
+											  useful_pathkeys,
+											  rel->lateral_relids,
+											  sorted_epq_path,
+											  NIL));
+	}
+}
+
+/*
  * Parse options from foreign server and apply them to fpinfo.
  *
  * New options might also require tweaking merge_fdw_options().
  */
 static void
-apply_server_options(PgFdwRelationInfo *fpinfo) {
-	ListCell *lc;
+apply_server_options(PgFdwRelationInfo *fpinfo)
+{
+	ListCell   *lc;
 
-	foreach (lc, fpinfo->server->options) {
-		DefElem *def = (DefElem *)lfirst(lc);
+	foreach(lc, fpinfo->server->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
 
 		if (strcmp(def->defname, "use_remote_estimate") == 0)
 			fpinfo->use_remote_estimate = defGetBoolean(def);
 		else if (strcmp(def->defname, "fdw_startup_cost") == 0)
-			(void)parse_real(defGetString(def), &fpinfo->fdw_startup_cost, 0,
-				NULL);
+			fpinfo->fdw_startup_cost = strtod(defGetString(def), NULL);
 		else if (strcmp(def->defname, "fdw_tuple_cost") == 0)
-			(void)parse_real(defGetString(def), &fpinfo->fdw_tuple_cost, 0,
-				NULL);
+			fpinfo->fdw_tuple_cost = strtod(defGetString(def), NULL);
 		else if (strcmp(def->defname, "extensions") == 0)
 			fpinfo->shippable_extensions =
 				ExtractExtensionList(defGetString(def), false);
 		else if (strcmp(def->defname, "fetch_size") == 0)
-			(void)parse_int(defGetString(def), &fpinfo->fetch_size, 0, NULL);
-		else if (strcmp(def->defname, "async_capable") == 0)
-			fpinfo->async_capable = defGetBoolean(def);
+			fpinfo->fetch_size = strtol(defGetString(def), NULL, 10);
 		else if (strcmp(def->defname, "fragcnt") == 0)
 			(void)parse_int(defGetString(def), &fpinfo->fragcnt, 0, NULL);
 	}
@@ -2025,18 +2722,18 @@ apply_server_options(PgFdwRelationInfo *fpinfo) {
  * New options might also require tweaking merge_fdw_options().
  */
 static void
-apply_table_options(PgFdwRelationInfo *fpinfo) {
-	ListCell *lc;
+apply_table_options(PgFdwRelationInfo *fpinfo)
+{
+	ListCell   *lc;
 
-	foreach (lc, fpinfo->table->options) {
-		DefElem *def = (DefElem *)lfirst(lc);
+	foreach(lc, fpinfo->table->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
 
 		if (strcmp(def->defname, "use_remote_estimate") == 0)
 			fpinfo->use_remote_estimate = defGetBoolean(def);
 		else if (strcmp(def->defname, "fetch_size") == 0)
-			(void)parse_int(defGetString(def), &fpinfo->fetch_size, 0, NULL);
-		else if (strcmp(def->defname, "async_capable") == 0)
-			fpinfo->async_capable = defGetBoolean(def);
+			fpinfo->fetch_size = strtol(defGetString(def), NULL, 10);
 		else if (strcmp(def->defname, "fmt") == 0)
 			fpinfo->fmt = defGetString(def);
 		else if (strcmp(def->defname, "csv_delimiter") == 0)
@@ -2063,8 +2760,9 @@ apply_table_options(PgFdwRelationInfo *fpinfo) {
  */
 static void
 merge_fdw_options(PgFdwRelationInfo *fpinfo,
-	const PgFdwRelationInfo *fpinfo_o,
-	const PgFdwRelationInfo *fpinfo_i) {
+				  const PgFdwRelationInfo *fpinfo_o,
+				  const PgFdwRelationInfo *fpinfo_i)
+{
 	/* We must always have fpinfo_o. */
 	Assert(fpinfo_o);
 
@@ -2083,7 +2781,6 @@ merge_fdw_options(PgFdwRelationInfo *fpinfo,
 	fpinfo->use_remote_estimate = fpinfo_o->use_remote_estimate;
 	fpinfo->fetch_size = fpinfo_o->fetch_size;
 	fpinfo->fragcnt = fpinfo_o->fragcnt;
-	fpinfo->async_capable = fpinfo_o->async_capable;
 	fpinfo->fmt = fpinfo_o->fmt;
 	fpinfo->csv_delim = fpinfo_o->csv_delim;
 	fpinfo->csv_quote = fpinfo_o->csv_quote;
@@ -2092,7 +2789,8 @@ merge_fdw_options(PgFdwRelationInfo *fpinfo,
 	fpinfo->csv_header = fpinfo_o->csv_header;
 
 	/* Merge the table level options from either side of the join. */
-	if (fpinfo_i) {
+	if (fpinfo_i)
+	{
 		/*
 		 * We'll prefer to use remote estimates for this join if any table
 		 * from either side of the join is using remote estimates.  This is
@@ -2102,7 +2800,7 @@ merge_fdw_options(PgFdwRelationInfo *fpinfo,
 		 * best.
 		 */
 		fpinfo->use_remote_estimate = fpinfo_o->use_remote_estimate ||
-									  fpinfo_i->use_remote_estimate;
+			fpinfo_i->use_remote_estimate;
 
 		/*
 		 * Set fetch size to maximum of the joining sides, since we are
@@ -2119,17 +2817,6 @@ merge_fdw_options(PgFdwRelationInfo *fpinfo,
 		fpinfo->csv_quote = fpinfo_o->csv_quote ? fpinfo_o->csv_quote: fpinfo_i->csv_quote;
 		fpinfo->csv_nullstr = fpinfo_o->csv_nullstr ? fpinfo_o->csv_nullstr : fpinfo_i->csv_nullstr;
 		fpinfo->csv_header = fpinfo_o->csv_header || fpinfo_i->csv_header;
-
-
-		/*
-		 * We'll prefer to consider this join async-capable if any table from
-		 * either side of the join is considered async-capable.  This would be
-		 * reasonable because in that case the foreign server would have its
-		 * own resources to scan that table asynchronously, and the join could
-		 * also be computed asynchronously using the resources.
-		 */
-		fpinfo->async_capable = fpinfo_o->async_capable ||
-								fpinfo_i->async_capable;
 	}
 }
 
@@ -2140,21 +2827,22 @@ merge_fdw_options(PgFdwRelationInfo *fpinfo,
  */
 static bool
 foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
-	Node *havingQual) {
-	Query *query = root->parse;
-	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *)grouped_rel->fdw_private;
+					Node *havingQual)
+{
+	Query	   *query = root->parse;
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) grouped_rel->fdw_private;
 	PathTarget *grouping_target = grouped_rel->reltarget;
 	PgFdwRelationInfo *ofpinfo;
-	ListCell *lc;
-	int i;
-	List *tlist = NIL;
+	ListCell   *lc;
+	int			i;
+	List	   *tlist = NIL;
 
 	/* We currently don't support pushing Grouping Sets. */
 	if (query->groupingSets)
 		return false;
 
 	/* Get the fpinfo of the underlying scan relation. */
-	ofpinfo = (PgFdwRelationInfo *)fpinfo->outerrel->fdw_private;
+	ofpinfo = (PgFdwRelationInfo *) fpinfo->outerrel->fdw_private;
 
 	/*
 	 * If underlying scan relation has any local conditions, those conditions
@@ -2181,13 +2869,15 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 	 * a node, as long as it's not at top level; then no match is possible.
 	 */
 	i = 0;
-	foreach (lc, grouping_target->exprs) {
-		Expr *expr = (Expr *)lfirst(lc);
-		Index sgref = get_pathtarget_sortgroupref(grouping_target, i);
-		ListCell *l;
+	foreach(lc, grouping_target->exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		Index		sgref = get_pathtarget_sortgroupref(grouping_target, i);
+		ListCell   *l;
 
 		/* Check whether this expression is part of GROUP BY clause */
-		if (sgref && get_sortgroupref_clause_noerr(sgref, query->groupClause)) {
+		if (sgref && get_sortgroupref_clause_noerr(sgref, query->groupClause))
+		{
 			TargetEntry *tle;
 
 			/*
@@ -2215,21 +2905,26 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 			tle = makeTargetEntry(expr, list_length(tlist) + 1, NULL, false);
 			tle->ressortgroupref = sgref;
 			tlist = lappend(tlist, tle);
-		} else {
+		}
+		else
+		{
 			/*
 			 * Non-grouping expression we need to compute.  Can we ship it
 			 * as-is to the foreign server?
 			 */
 			if (is_foreign_expr(root, grouped_rel, expr) &&
-				!is_foreign_param(root, grouped_rel, expr)) {
+				!is_foreign_param(root, grouped_rel, expr))
+			{
 				/* Yes, so add to tlist as-is; OK to suppress duplicates */
 				tlist = add_to_flat_tlist(tlist, list_make1(expr));
-			} else {
+			}
+			else
+			{
 				/* Not pushable as a whole; extract its Vars and aggregates */
-				List *aggvars;
+				List	   *aggvars;
 
-				aggvars = pull_var_clause((Node *)expr,
-					PVC_INCLUDE_AGGREGATES);
+				aggvars = pull_var_clause((Node *) expr,
+										  PVC_INCLUDE_AGGREGATES);
 
 				/*
 				 * If any aggregate expression is not shippable, then we
@@ -2237,7 +2932,7 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 				 * don't have to check is_foreign_param, since that certainly
 				 * won't return true for any such expression.)
 				 */
-				if (!is_foreign_expr(root, grouped_rel, (Expr *)aggvars))
+				if (!is_foreign_expr(root, grouped_rel, (Expr *) aggvars))
 					return false;
 
 				/*
@@ -2250,8 +2945,9 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 				 * GROUP BY column would cause the foreign server to complain
 				 * that the shipped query is invalid.
 				 */
-				foreach (l, aggvars) {
-					Expr *expr = (Expr *)lfirst(l);
+				foreach(l, aggvars)
+				{
+					Expr	   *expr = (Expr *) lfirst(l);
 
 					if (IsA(expr, Aggref))
 						tlist = add_to_flat_tlist(tlist, list_make1(expr));
@@ -2266,11 +2962,13 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 	 * Classify the pushable and non-pushable HAVING clauses and save them in
 	 * remote_conds and local_conds of the grouped rel's fpinfo.
 	 */
-	if (havingQual) {
-		ListCell *lc;
+	if (havingQual)
+	{
+		ListCell   *lc;
 
-		foreach (lc, (List *)havingQual) {
-			Expr *expr = (Expr *)lfirst(lc);
+		foreach(lc, (List *) havingQual)
+		{
+			Expr	   *expr = (Expr *) lfirst(lc);
 			RestrictInfo *rinfo;
 
 			/*
@@ -2279,16 +2977,16 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 			 */
 			Assert(!IsA(expr, RestrictInfo));
 			rinfo = make_restrictinfo(root,
-				expr,
-				true,
-				false,
-				false,
-				root->qual_security_level,
-				grouped_rel->relids,
-				NULL,
-				NULL);
-
+									  expr,
+									  true,
+									  false,
+									  false,
+									  root->qual_security_level,
+									  grouped_rel->relids,
+									  NULL,
+									  NULL);
 #if 1
+
 			/* KITE cannot handle HAVING */
 			fpinfo->local_conds = lappend(fpinfo->local_conds, rinfo);
 #else
@@ -2304,20 +3002,23 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 	 * If there are any local conditions, pull Vars and aggregates from it and
 	 * check whether they are safe to pushdown or not.
 	 */
-	if (fpinfo->local_conds) {
-		List *aggvars = NIL;
-		ListCell *lc;
+	if (fpinfo->local_conds)
+	{
+		List	   *aggvars = NIL;
+		ListCell   *lc;
 
-		foreach (lc, fpinfo->local_conds) {
+		foreach(lc, fpinfo->local_conds)
+		{
 			RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 
 			aggvars = list_concat(aggvars,
-				pull_var_clause((Node *)rinfo->clause,
-					PVC_INCLUDE_AGGREGATES));
+								  pull_var_clause((Node *) rinfo->clause,
+												  PVC_INCLUDE_AGGREGATES));
 		}
 
-		foreach (lc, aggvars) {
-			Expr *expr = (Expr *)lfirst(lc);
+		foreach(lc, aggvars)
+		{
+			Expr	   *expr = (Expr *) lfirst(lc);
 
 			/*
 			 * If aggregates within local conditions are not safe to push
@@ -2326,7 +3027,8 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 			 * access them again here.  Again, we need not check
 			 * is_foreign_param for a foreign aggregate.
 			 */
-			if (IsA(expr, Aggref)) {
+			if (IsA(expr, Aggref))
+			{
 				if (!is_foreign_expr(root, grouped_rel, expr))
 					return false;
 
@@ -2352,12 +3054,11 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
 
 	/*
 	 * Set the string describing this grouped relation to be used in EXPLAIN
-	 * output of corresponding ForeignScan.  Note that the decoration we add
-	 * to the base relation name mustn't include any digits, or it'll confuse
-	 * kiteExplainForeignScan.
+	 * output of corresponding ForeignScan.
 	 */
-	fpinfo->relation_name = psprintf("Aggregate on (%s)",
-		ofpinfo->relation_name);
+	fpinfo->relation_name = makeStringInfo();
+	appendStringInfo(fpinfo->relation_name, "Aggregate on (%s)",
+					 ofpinfo->relation_name->data);
 
 	return true;
 }
@@ -2369,8 +3070,9 @@ foreign_grouping_ok(PlannerInfo *root, RelOptInfo *grouped_rel,
  */
 static void
 kiteGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
-	RelOptInfo *input_rel, RelOptInfo *output_rel,
-	void *extra) {
+							 RelOptInfo *input_rel, RelOptInfo *output_rel,
+							 void *extra)
+{
 	PgFdwRelationInfo *fpinfo;
 
 	/*
@@ -2378,41 +3080,41 @@ kiteGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 	 * perform any post-join operations on the foreign server.
 	 */
 	if (!input_rel->fdw_private ||
-		!((PgFdwRelationInfo *)input_rel->fdw_private)->pushdown_safe)
+		!((PgFdwRelationInfo *) input_rel->fdw_private)->pushdown_safe)
 		return;
 
 	/* Ignore stages we don't support; and skip any duplicate calls. */
-	/* KITE don't support ORDER BY */
 	if ((stage != UPPERREL_GROUP_AGG &&
-			stage != UPPERREL_FINAL &&
-			stage != UPPERREL_CDB_FIRST_STAGE_GROUP_AGG) ||
+		 stage != UPPERREL_FINAL &&
+		 stage != UPPERREL_CDB_FIRST_STAGE_GROUP_AGG) ||
 		output_rel->fdw_private)
 		return;
 
-	fpinfo = (PgFdwRelationInfo *)palloc0(sizeof(PgFdwRelationInfo));
+	fpinfo = (PgFdwRelationInfo *) palloc0(sizeof(PgFdwRelationInfo));
 	fpinfo->pushdown_safe = false;
 	fpinfo->stage = stage;
 	output_rel->fdw_private = fpinfo;
 
-	switch (stage) {
-	case UPPERREL_CDB_FIRST_STAGE_GROUP_AGG:
-		/* It's unsafe to push having statements with partial aggregates */
-		if(((GroupPathExtraData *) extra)->havingQual) {
-			return;
-		}
-		/* Fall through */
-		/* Partial agg push down path */
-	case UPPERREL_GROUP_AGG:
-		add_foreign_grouping_paths(root, input_rel, output_rel,
-			(GroupPathExtraData *)extra);
-		break;
-	case UPPERREL_FINAL:
-		add_foreign_final_paths(root, input_rel, output_rel,
-			(FinalPathExtraData *)extra);
-		break;
-	default:
-		elog(ERROR, "unexpected upper relation: %d", (int)stage);
-		break;
+	switch (stage)
+	{
+		case UPPERREL_CDB_FIRST_STAGE_GROUP_AGG:
+			/* It's unsafe to push having statements with partial aggregates */
+			if(((GroupPathExtraData *) extra)->havingQual) {
+				return;
+			}
+			/* Fall through */
+			/* Partial agg push down path */
+		case UPPERREL_GROUP_AGG:
+			add_foreign_grouping_paths(root, input_rel, output_rel,
+									   (GroupPathExtraData *) extra);
+			break;
+		case UPPERREL_FINAL:
+			add_foreign_final_paths(root, input_rel, output_rel,
+									(FinalPathExtraData *) extra);
+			break;
+		default:
+			elog(ERROR, "unexpected upper relation: %d", (int) stage);
+			break;
 	}
 }
 
@@ -2425,16 +3127,17 @@ kiteGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
  */
 static void
 add_foreign_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
-	RelOptInfo *grouped_rel,
-	GroupPathExtraData *extra) {
-	Query *parse = root->parse;
+						   RelOptInfo *grouped_rel,
+						   GroupPathExtraData *extra)
+{
+	Query	   *parse = root->parse;
 	PgFdwRelationInfo *ifpinfo = input_rel->fdw_private;
 	PgFdwRelationInfo *fpinfo = grouped_rel->fdw_private;
 	ForeignPath *grouppath;
-	double rows;
-	int width;
-	Cost startup_cost;
-	Cost total_cost;
+	double		rows;
+	int			width;
+	Cost		startup_cost;
+	Cost		total_cost;
 
 	/* Nothing to be done, if there is no grouping or aggregation required. */
 	if (!parse->groupClause && !parse->groupingSets && !parse->hasAggs &&
@@ -2474,16 +3177,16 @@ add_foreign_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * is to estimate selectivity on the basis of local statistics.
 	 */
 	fpinfo->local_conds_sel = clauselist_selectivity(root,
-		fpinfo->local_conds,
-		0,
-		JOIN_INNER,
-		NULL);
+													 fpinfo->local_conds,
+													 0,
+													 JOIN_INNER,
+													 NULL);
 
 	cost_qual_eval(&fpinfo->local_conds_cost, fpinfo->local_conds, root);
 
 	/* Estimate the cost of push down */
 	estimate_path_cost_size(root, grouped_rel, NIL, NIL, NULL,
-		&rows, &width, &startup_cost, &total_cost);
+							&rows, &width, &startup_cost, &total_cost);
 
 	/* Now update this information in the fpinfo */
 	fpinfo->rows = rows;
@@ -2493,17 +3196,17 @@ add_foreign_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 
 	/* Create and add foreign path to the grouping relation. */
 	grouppath = create_foreign_upper_path(root,
-		grouped_rel,
-		grouped_rel->reltarget,
-		rows,
-		startup_cost,
-		total_cost,
-		NIL, /* no pathkeys */
-		NULL,
-		NIL); /* no fdw_private */
+										  grouped_rel,
+										  grouped_rel->reltarget,
+										  rows,
+										  startup_cost,
+										  total_cost,
+										  NIL,	/* no pathkeys */
+										  NULL,
+										  NIL); /* no fdw_private */
 
 	/* Add generated path into grouped_rel by add_path(). */
-	add_path(grouped_rel, (Path *)grouppath);
+	add_path(grouped_rel, (Path *) grouppath);
 }
 
 /*
@@ -2515,20 +3218,21 @@ add_foreign_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
  */
 static void
 add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
-	RelOptInfo *final_rel,
-	FinalPathExtraData *extra) {
-	Query *parse = root->parse;
-	PgFdwRelationInfo *ifpinfo = (PgFdwRelationInfo *)input_rel->fdw_private;
-	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *)final_rel->fdw_private;
-	bool has_final_sort = false;
-	List *pathkeys = NIL;
+						RelOptInfo *final_rel,
+						FinalPathExtraData *extra)
+{
+	Query	   *parse = root->parse;
+	PgFdwRelationInfo *ifpinfo = (PgFdwRelationInfo *) input_rel->fdw_private;
+	PgFdwRelationInfo *fpinfo = (PgFdwRelationInfo *) final_rel->fdw_private;
+	bool		has_final_sort = false;
+	List	   *pathkeys = NIL;
 	PgFdwPathExtraData *fpextra;
-	bool save_use_remote_estimate = false;
-	double rows;
-	int width;
-	Cost startup_cost;
-	Cost total_cost;
-	List *fdw_private;
+	bool		save_use_remote_estimate = false;
+	double		rows;
+	int			width;
+	Cost		startup_cost;
+	Cost		total_cost;
+	List	   *fdw_private;
 	ForeignPath *final_path;
 
 	/*
@@ -2566,8 +3270,9 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Note: we would already have accounted for the query's FOR UPDATE/SHARE
 	 * (if any) before we get here.
 	 */
-	if (!extra->limit_needed) {
-		ListCell *lc;
+	if (!extra->limit_needed)
+	{
+		ListCell   *lc;
 
 		Assert(parse->rowMarks);
 
@@ -2580,12 +3285,13 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		Assert(input_rel->reloptkind == RELOPT_BASEREL ||
 			   input_rel->reloptkind == RELOPT_JOINREL ||
 			   (input_rel->reloptkind == RELOPT_UPPER_REL &&
-				   ifpinfo->stage == UPPERREL_ORDERED &&
-				   (ifpinfo->outerrel->reloptkind == RELOPT_BASEREL ||
-					   ifpinfo->outerrel->reloptkind == RELOPT_JOINREL)));
+				ifpinfo->stage == UPPERREL_ORDERED &&
+				(ifpinfo->outerrel->reloptkind == RELOPT_BASEREL ||
+				 ifpinfo->outerrel->reloptkind == RELOPT_JOINREL)));
 
-		foreach (lc, input_rel->pathlist) {
-			Path *path = (Path *)lfirst(lc);
+		foreach(lc, input_rel->pathlist)
+		{
+			Path	   *path = (Path *) lfirst(lc);
 
 			/*
 			 * apply_scanjoin_target_to_paths() uses create_projection_path()
@@ -2597,24 +3303,25 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 			 */
 			if (IsA(path, ForeignPath) ||
 				(IsA(path, ProjectionPath) &&
-					IsA(((ProjectionPath *)path)->subpath, ForeignPath))) {
+				 IsA(((ProjectionPath *) path)->subpath, ForeignPath)))
+			{
 				/*
 				 * Create foreign final path; this gets rid of a
 				 * no-longer-needed outer plan (if any), which makes the
 				 * EXPLAIN output look cleaner
 				 */
 				final_path = create_foreign_upper_path(root,
-					path->parent,
-					path->pathtarget,
-					path->rows,
-					path->startup_cost,
-					path->total_cost,
-					path->pathkeys,
-					NULL,  /* no extra plan */
-					NULL); /* no fdw_private */
+													   path->parent,
+													   path->pathtarget,
+													   path->rows,
+													   path->startup_cost,
+													   path->total_cost,
+													   path->pathkeys,
+													   NULL,	/* no extra plan */
+													   NULL);	/* no fdw_private */
 
 				/* and add it to the final_rel */
-				add_path(final_rel, (Path *)final_path);
+				add_path(final_rel, (Path *) final_path);
 
 				/* Safe to push down */
 				fpinfo->pushdown_safe = true;
@@ -2638,9 +3345,10 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * input relation
 	 */
 	if (input_rel->reloptkind == RELOPT_UPPER_REL &&
-		ifpinfo->stage == UPPERREL_ORDERED) {
+		ifpinfo->stage == UPPERREL_ORDERED)
+	{
 		input_rel = ifpinfo->outerrel;
-		ifpinfo = (PgFdwRelationInfo *)input_rel->fdw_private;
+		ifpinfo = (PgFdwRelationInfo *) input_rel->fdw_private;
 		has_final_sort = true;
 		pathkeys = root->sort_pathkeys;
 	}
@@ -2649,7 +3357,7 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	Assert(input_rel->reloptkind == RELOPT_BASEREL ||
 		   input_rel->reloptkind == RELOPT_JOINREL ||
 		   (input_rel->reloptkind == RELOPT_UPPER_REL &&
-			   ifpinfo->stage == UPPERREL_GROUP_AGG));
+			ifpinfo->stage == UPPERREL_GROUP_AGG));
 
 	/*
 	 * We try to create a path below by extending a simple foreign path for
@@ -2676,15 +3384,15 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Also, the LIMIT/OFFSET cannot be pushed down, if their expressions are
 	 * not safe to remote.
 	 */
-	if (!is_foreign_expr(root, input_rel, (Expr *)parse->limitOffset) ||
-		!is_foreign_expr(root, input_rel, (Expr *)parse->limitCount))
+	if (!is_foreign_expr(root, input_rel, (Expr *) parse->limitOffset) ||
+		!is_foreign_expr(root, input_rel, (Expr *) parse->limitCount))
 		return;
 
 	/* Safe to push down */
 	fpinfo->pushdown_safe = true;
 
 	/* Construct PgFdwPathExtraData */
-	fpextra = (PgFdwPathExtraData *)palloc0(sizeof(PgFdwPathExtraData));
+	fpextra = (PgFdwPathExtraData *) palloc0(sizeof(PgFdwPathExtraData));
 	fpextra->target = root->upper_targets[UPPERREL_FINAL];
 	fpextra->has_final_sort = has_final_sort;
 	fpextra->has_limit = extra->limit_needed;
@@ -2701,12 +3409,13 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * it's pretty expensive to execute EXPLAIN, force use_remote_estimate to
 	 * false in that case.
 	 */
-	if (!fpextra->has_final_sort) {
+	if (!fpextra->has_final_sort)
+	{
 		save_use_remote_estimate = ifpinfo->use_remote_estimate;
 		ifpinfo->use_remote_estimate = false;
 	}
 	estimate_path_cost_size(root, input_rel, NIL, pathkeys, fpextra,
-		&rows, &width, &startup_cost, &total_cost);
+							&rows, &width, &startup_cost, &total_cost);
 	if (!fpextra->has_final_sort)
 		ifpinfo->use_remote_estimate = save_use_remote_estimate;
 
@@ -2715,24 +3424,24 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Items in the list must match order in enum FdwPathPrivateIndex.
 	 */
 	fdw_private = list_make2(makeInteger(has_final_sort),
-		makeInteger(extra->limit_needed));
+							 makeInteger(extra->limit_needed));
 
 	/*
 	 * Create foreign final path; this gets rid of a no-longer-needed outer
 	 * plan (if any), which makes the EXPLAIN output look cleaner
 	 */
 	final_path = create_foreign_upper_path(root,
-		input_rel,
-		root->upper_targets[UPPERREL_FINAL],
-		rows,
-		startup_cost,
-		total_cost,
-		pathkeys,
-		NULL, /* no extra plan */
-		fdw_private);
+										   input_rel,
+										   root->upper_targets[UPPERREL_FINAL],
+										   rows,
+										   startup_cost,
+										   total_cost,
+										   pathkeys,
+										   NULL,	/* no extra plan */
+										   fdw_private);
 
 	/* and add it to the final_rel */
-	add_path(final_rel, (Path *)final_path);
+	add_path(final_rel, (Path *) final_path);
 }
 
 /*
@@ -2849,7 +3558,7 @@ make_tuple_from_agg(xrg_agg_t *agg,
 }
 
 static HeapTuple
-make_tuple_from_partial_agg(xrg_agg_p_t *agg, 
+make_tuple_from_partial_agg(xrg_agg_p_t *agg,
 	xrg_iter_t *iter,
 	int row,
 	Relation rel,
@@ -3043,6 +3752,44 @@ make_tuple_from_result_row(xrg_iter_t *iter,
 	return tuple;
 }
 
+
+#if 0
+static void get_retrieved_partial_aggfnoids(ForeignScanState *fsstate,
+											List *retrieved_attrs,
+											List **retrieved_aggfnoids)
+{
+	ListCell *lc = NULL;
+	if (!fsstate)
+	{
+		foreach(lc, retrieved_attrs)
+			*retrieved_aggfnoids = lappend_oid(*retrieved_aggfnoids, InvalidOid);
+	}
+	else
+	{
+		/* ForeignScan case */
+		ForeignScan *fsplan = castNode(ForeignScan, fsstate->ss.ps.plan);
+		if(!fsplan->fdw_scan_tlist)
+		{
+			foreach(lc, retrieved_attrs)
+				*retrieved_aggfnoids = lappend_oid(*retrieved_aggfnoids, InvalidOid);
+		}
+		else
+		{
+			foreach(lc, fsplan->fdw_scan_tlist)
+			{
+				TargetEntry *tle = lfirst_node(TargetEntry, lc);
+
+				if (tle->expr != NULL && nodeTag(tle->expr) == T_Aggref &&
+					((Aggref *) tle->expr)->aggsplit == AGGSPLIT_INITIAL_SERIAL)
+					*retrieved_aggfnoids = lappend_oid(*retrieved_aggfnoids, ((Aggref *) tle->expr)->aggfnoid);
+				else
+					*retrieved_aggfnoids = lappend_oid(*retrieved_aggfnoids, InvalidOid);
+			}
+		}
+	}
+}
+#endif
+
 /*
  * Callback function which is called when error occurs during column value
  * conversion.  Print names of column and relation.
@@ -3052,51 +3799,58 @@ make_tuple_from_result_row(xrg_iter_t *iter,
  * from the relation or the query's rangetable instead.
  */
 static void
-conversion_error_callback(void *arg) {
-	ConversionLocation *errpos = (ConversionLocation *)arg;
-	Relation rel = errpos->rel;
+conversion_error_callback(void *arg)
+{
+	ConversionLocation *errpos = (ConversionLocation *) arg;
+	Relation	rel = errpos->rel;
 	ForeignScanState *fsstate = errpos->fsstate;
 	const char *attname = NULL;
 	const char *relname = NULL;
-	bool is_wholerow = false;
+	bool		is_wholerow = false;
 
 	/*
 	 * If we're in a scan node, always use aliases from the rangetable, for
 	 * consistency between the simple-relation and remote-join cases.  Look at
 	 * the relation's tupdesc only if we're not in a scan node.
 	 */
-	if (fsstate) {
+	if (fsstate)
+	{
 		/* ForeignScan case */
 		ForeignScan *fsplan = castNode(ForeignScan, fsstate->ss.ps.plan);
-		int varno = 0;
-		AttrNumber colno = 0;
+		int			varno = 0;
+		AttrNumber	colno = 0;
 
-		if (fsplan->scan.scanrelid > 0) {
+		if (fsplan->scan.scanrelid > 0)
+		{
 			/* error occurred in a scan against a foreign table */
 			varno = fsplan->scan.scanrelid;
 			colno = errpos->cur_attno;
-		} else {
+		}
+		else
+		{
 			/* error occurred in a scan against a foreign join */
 			TargetEntry *tle;
 
 			tle = list_nth_node(TargetEntry, fsplan->fdw_scan_tlist,
-				errpos->cur_attno - 1);
+								errpos->cur_attno - 1);
 
 			/*
 			 * Target list can have Vars and expressions.  For Vars, we can
 			 * get some information, however for expressions we can't.  Thus
 			 * for expressions, just show generic context message.
 			 */
-			if (IsA(tle->expr, Var)) {
-				Var *var = (Var *)tle->expr;
+			if (IsA(tle->expr, Var))
+			{
+				Var		   *var = (Var *) tle->expr;
 
 				varno = var->varno;
 				colno = var->varattno;
 			}
 		}
 
-		if (varno > 0) {
-			EState *estate = fsstate->ss.ps.state;
+		if (varno > 0)
+		{
+			EState	   *estate = fsstate->ss.ps.state;
 			RangeTblEntry *rte = exec_rt_fetch(varno, estate);
 
 			relname = rte->eref->aliasname;
@@ -3108,17 +3862,21 @@ conversion_error_callback(void *arg) {
 			else if (colno == SelfItemPointerAttributeNumber)
 				attname = "ctid";
 		}
-	} else if (rel) {
+	}
+	else if (rel)
+	{
 		/* Non-ForeignScan case (we should always have a rel here) */
-		TupleDesc tupdesc = RelationGetDescr(rel);
+		TupleDesc	tupdesc = RelationGetDescr(rel);
 
 		relname = RelationGetRelationName(rel);
-		if (errpos->cur_attno > 0 && errpos->cur_attno <= tupdesc->natts) {
+		if (errpos->cur_attno > 0 && errpos->cur_attno <= tupdesc->natts)
+		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc,
-				errpos->cur_attno - 1);
+												   errpos->cur_attno - 1);
 
 			attname = NameStr(attr->attname);
-		} else if (errpos->cur_attno == SelfItemPointerAttributeNumber)
+		}
+		else if (errpos->cur_attno == SelfItemPointerAttributeNumber)
 			attname = "ctid";
 	}
 
@@ -3128,7 +3886,7 @@ conversion_error_callback(void *arg) {
 		errcontext("column \"%s\" of foreign table \"%s\"", attname, relname);
 	else
 		errcontext("processing expression at position %d in select list",
-			errpos->cur_attno);
+				   errpos->cur_attno);
 }
 
 /*
@@ -3144,11 +3902,13 @@ conversion_error_callback(void *arg) {
  * ordering operator is shippable.
  */
 EquivalenceMember *
-find_em_for_rel(PlannerInfo *root, EquivalenceClass *ec, RelOptInfo *rel) {
-	ListCell *lc;
+find_em_for_rel(PlannerInfo *root, EquivalenceClass *ec, RelOptInfo *rel)
+{
+	ListCell   *lc;
 
-	foreach (lc, ec->ec_members) {
-		EquivalenceMember *em = (EquivalenceMember *)lfirst(lc);
+	foreach(lc, ec->ec_members)
+	{
+		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
 
 		/*
 		 * Note we require !bms_is_empty, else we'd accept constant
@@ -3176,33 +3936,37 @@ find_em_for_rel(PlannerInfo *root, EquivalenceClass *ec, RelOptInfo *rel) {
  */
 EquivalenceMember *
 find_em_for_rel_target(PlannerInfo *root, EquivalenceClass *ec,
-	RelOptInfo *rel) {
+					   RelOptInfo *rel)
+{
 	PathTarget *target = rel->reltarget;
-	ListCell *lc1;
-	int i;
+	ListCell   *lc1;
+	int			i;
 
 	i = 0;
-	foreach (lc1, target->exprs) {
-		Expr *expr = (Expr *)lfirst(lc1);
-		Index sgref = get_pathtarget_sortgroupref(target, i);
-		ListCell *lc2;
+	foreach(lc1, target->exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc1);
+		Index		sgref = get_pathtarget_sortgroupref(target, i);
+		ListCell   *lc2;
 
 		/* Ignore non-sort expressions */
 		if (sgref == 0 ||
 			get_sortgroupref_clause_noerr(sgref,
-				root->parse->sortClause) == NULL) {
+										  root->parse->sortClause) == NULL)
+		{
 			i++;
 			continue;
 		}
 
 		/* We ignore binary-compatible relabeling on both ends */
 		while (expr && IsA(expr, RelabelType))
-			expr = ((RelabelType *)expr)->arg;
+			expr = ((RelabelType *) expr)->arg;
 
 		/* Locate an EquivalenceClass member matching this expr, if any */
-		foreach (lc2, ec->ec_members) {
-			EquivalenceMember *em = (EquivalenceMember *)lfirst(lc2);
-			Expr *em_expr;
+		foreach(lc2, ec->ec_members)
+		{
+			EquivalenceMember *em = (EquivalenceMember *) lfirst(lc2);
+			Expr	   *em_expr;
 
 			/* Don't match constants */
 			if (em->em_is_const)
@@ -3215,7 +3979,7 @@ find_em_for_rel_target(PlannerInfo *root, EquivalenceClass *ec,
 			/* Match if same expression (after stripping relabel) */
 			em_expr = em->em_expr;
 			while (em_expr && IsA(em_expr, RelabelType))
-				em_expr = ((RelabelType *)em_expr)->arg;
+				em_expr = ((RelabelType *) em_expr)->arg;
 
 			if (!equal(em_expr, expr))
 				continue;
@@ -3230,6 +3994,7 @@ find_em_for_rel_target(PlannerInfo *root, EquivalenceClass *ec,
 
 	return NULL;
 }
+
 
 static bool kite_get_relation_stats(PgFdwRelationInfo *fpinfo, Relation relation, kite_filespec_t *fspec,
 		BlockNumber *totalpages, double *totalrows) {
@@ -3252,7 +4017,7 @@ static bool kite_get_relation_stats(PgFdwRelationInfo *fpinfo, Relation relation
 	 */
 	table = GetForeignTable(RelationGetRelid(relation));
 	user = GetUserMapping(relation->rd_rel->relowner, table->serverid);
-	req = GetConnection(user, false, NULL);
+	req = GetConnection(user, false);
 
 	/*
 	 * Construct command to get page count for relation.
@@ -3269,7 +4034,12 @@ static bool kite_get_relation_stats(PgFdwRelationInfo *fpinfo, Relation relation
 		initStringInfo(&schema);
 		kite_build_schema(&schema, tupdesc);
 	}
+	
+	if (fpinfo->fragcnt <= 0) {
+		fpinfo->fragcnt = 1;
+	}
 	//elog(LOG, "scheam %s", schema.data);
+	//elog(LOG, "fragcnt = %d", fpinfo->fragcnt);
 
 	req->hdl = kite_submit(req->host, schema.data, sql.data, -1, fpinfo->fragcnt, fspec, errmsg, sizeof(errmsg));
 	if (!req->hdl) {
@@ -3310,196 +4080,30 @@ static bool kite_get_relation_stats(PgFdwRelationInfo *fpinfo, Relation relation
 	return true;
 }
 
-/*
- * kiteAnalyzeForeignTable
- *		Test whether analyzing this foreign table is supported
- */
-static bool
-kiteAnalyzeForeignTable(Relation relation,
-	AcquireSampleRowsFunc *func,
-	BlockNumber *totalpages) {
-
-	double totalrows = 0;
-
-	/* Return the row-analysis function pointer */
-	*func = kiteAcquireSampleRowsFunc;
-
-	//return kite_get_relation_stats(relation, totalpages, &totalrows);
-	// give fake number and get the stats in the later stage
-	*totalpages = 100;
-
-	return true;
-}
-
-/*
- * Acquire a random sample of rows from foreign table managed by kite_fdw.
- *
- * We fetch the whole table from the remote side and pick out some sample rows.
- *
- * Selected rows are returned in the caller-allocated array rows[],
- * which must have at least targrows entries.
- * The actual number of rows selected is returned as the function result.
- * We also count the total number of rows in the table and return it into
- * *totalrows.  Note that *totaldeadrows is always set to 0.
- *
- * Note that the returned list of rows is not always in order by physical
- * position in the table.  Therefore, correlation estimates derived later
- * may be meaningless, but it's OK because we don't use the estimates
- * currently (the planner only pays attention to correlation for indexscans).
- */
+#if 0
 static int
-kiteAcquireSampleRowsFunc(Relation relation, int elevel,
-	HeapTuple *rows, int targrows,
-	double *totalrows,
-	double *totaldeadrows) {
+greenplumCheckIsGreenplum(UserMapping *user)
+{
+	PGconn     *conn;
+	PGresult   *res;
+	int                     ret;
 
-	PgFdwAnalyzeState astate;
-	PgFdwRelationInfo *fpinfo;
-	char errormsg[1024];
-	ForeignTable *table;
-	UserMapping *user;
-	kite_request_t *req;
-	StringInfoData sql, schema;
-	List *retrieved_attrs;
-	BlockNumber totalpages = 0;
-	xrg_iter_t *iter = 0;
-	int e = 0;
-	MemoryContext oldcontext;
-	kite_filespec_t *fspec;
+	char *query =  "SELECT version()";
 
-	astate.rel = relation;
-	astate.attinmeta = TupleDescGetAttInMetadata(RelationGetDescr(relation));
-	astate.rows = rows;
-	astate.targrows = targrows;
-	astate.numrows = 0;
-	astate.samplerows = 0;
+	conn = GetConnection(user, false);
 
-	fpinfo = (PgFdwRelationInfo *)palloc0(sizeof(PgFdwRelationInfo));
-	/* Look up foreign-table catalog info. */
-	fpinfo->table = GetForeignTable(relation->rd_id);
-	fpinfo->server = GetForeignServer(fpinfo->table->serverid);
+	res = pgfdw_exec_query(conn, query);
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pgfdw_report_error(ERROR, res, conn, true, query);
 
-	fpinfo->fragcnt = 1;
-	fpinfo->csv_delim = ',';
-	fpinfo->csv_quote = '"';
-	fpinfo->csv_escape = '"';
-	fpinfo->csv_nullstr = 0;
-	fpinfo->csv_header = false;
-	apply_server_options(fpinfo);
-	apply_table_options(fpinfo);
+	if (PQntuples(res) == 0)
+		pgfdw_report_error(ERROR, res, conn, true, query);
 
-        /*
-         * build filespec for KITE
-         */
-        fspec = (kite_filespec_t*) palloc0(sizeof(kite_filespec_t));
-        if (! fpinfo->fmt) {
-                elog(ERROR, "table option fmt is not specified");
-        }
+	ret = strstr(PQgetvalue(res, 0, 0), "Greenplum Database") ? 1 : 0;
 
-        strcpy(fspec->fmt, fpinfo->fmt);
-        fspec->u.csv.delim = fpinfo->csv_delim;
-        fspec->u.csv.quote = fpinfo->csv_quote;
-        fspec->u.csv.escape = fpinfo->csv_escape;
-        if (fpinfo->csv_nullstr) {
-                strcpy(fspec->u.csv.nullstr, fpinfo->csv_nullstr);
-        } else {
-                *fspec->u.csv.nullstr = 0;
-        }
-        fspec->u.csv.header_line = fpinfo->csv_header;
+	PQclear(res);
+	ReleaseConnection(conn);
 
-
-	if (!kite_get_relation_stats(fpinfo, relation, fspec, &totalpages, &astate.samplerows)) {
-		elog(ERROR, "kite_Get_relation_stats failed");
-		return 0;
-	}
-
-	/* Remember ANALYZE context, and create a per-tuple temp context */
-	astate.anl_cxt = CurrentMemoryContext;
-	astate.temp_cxt = AllocSetContextCreate(CurrentMemoryContext,
-		"kite_fdw temporary data",
-		ALLOCSET_SMALL_SIZES);
-
-	/*
-	 * Get the connection to use.  We do the remote access as the table's
-	 * owner, even if the ANALYZE was started by some other user.
-	 */
-	table = GetForeignTable(RelationGetRelid(relation));
-	user = GetUserMapping(relation->rd_rel->relowner, table->serverid);
-	req = GetConnection(user, false, NULL);
-
-	/*
-	 * Construct command to get page count for relation.
-	 */
-	retrieved_attrs = NULL;
-	initStringInfo(&sql);
-	deparseAnalyzeSql(&sql, relation, &retrieved_attrs, targrows, *totalrows);
-
-	/*
-         * build the schema for KITE
-	 */
-	{
-		TupleDesc tupdesc = RelationGetDescr(relation);
-		initStringInfo(&schema);
-		kite_build_schema(&schema, tupdesc);
-	}
-
-	req->hdl = kite_submit(req->host, schema.data, sql.data, -1, fpinfo->fragcnt, fspec, errormsg, sizeof(errormsg));
-	if (!req->hdl) {
-		elog(ERROR, "kite_submit failed -- %s", errormsg);
-		return 0;
-	}
-
-	PG_TRY();
-	{
-
-		oldcontext = MemoryContextSwitchTo(astate.anl_cxt);
-		for (int i = 0; i < targrows; i++) {
-
-			e = kite_next_row(req->hdl, &iter, errormsg, sizeof(errormsg));
-			if (e == 0) {
-				if (iter == 0) {
-					break;
-				}
-
-				rows[i] = make_tuple_from_result_row(iter,
-					i,
-					astate.rel,
-					astate.attinmeta,
-					retrieved_attrs,
-					NULL,
-					astate.temp_cxt);
-
-				astate.numrows++;
-			} else {
-				elog(ERROR, "kite_next_row failed");
-			}
-		}
-		MemoryContextSwitchTo(oldcontext);
-
-		elog(LOG, "Analyze sample received %d rows, targrows =%d", astate.numrows, astate.targrows);
-	}
-	PG_CATCH();
-	{
-		ReleaseConnection(req);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	ReleaseConnection(req);
-
-	/* We assume that we have no dead tuple */
-	*totaldeadrows = 0;
-
-	/* We've retrieved total number of rows from foreign server */
-	*totalrows = astate.samplerows;
-
-	/*
-	 * Emit some interesting relation info
-	 */
-	ereport(elevel,
-		(errmsg("\"%s\": table contains %.0f rows, %d rows in sample",
-			RelationGetRelationName(relation),
-			astate.samplerows, astate.numrows)));
-
-	return astate.numrows;
+	return ret;
 }
+#endif

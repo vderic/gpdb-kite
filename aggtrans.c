@@ -106,7 +106,6 @@ Datum avg_p_float8(PG_FUNCTION_ARGS) {
 	PG_RETURN_POINTER(state);
 }
 
-
 PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
 	PGFunction refnaddr = NULL;
 	if (aggfnoid == InvalidOid) 

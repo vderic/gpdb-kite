@@ -116,11 +116,7 @@ kite_fdw_validator(PG_FUNCTION_ARGS)
 		 * Validate option value, when we can do so without any context.
 		 */
 		if (strcmp(def->defname, "use_remote_estimate") == 0 ||
-			strcmp(def->defname, "updatable") == 0 ||
-			strcmp(def->defname, "truncatable") == 0 ||
-			strcmp(def->defname, "async_capable") == 0 ||
-			strcmp(def->defname, "parallel_commit") == 0 ||
-			strcmp(def->defname, "keep_connections") == 0)
+			strcmp(def->defname, "updatable") == 0)
 		{
 			/* these accept only boolean values */
 			(void) defGetBoolean(def);
@@ -245,11 +241,6 @@ InitPgFdwOptions(void)
 		/* batch_size is available on both server and table */
 		{"batch_size", ForeignServerRelationId, false},
 		{"batch_size", ForeignTableRelationId, false},
-		/* async_capable is available on both server and table */
-		{"async_capable", ForeignServerRelationId, false},
-		{"async_capable", ForeignTableRelationId, false},
-		{"parallel_commit", ForeignServerRelationId, false},
-		{"keep_connections", ForeignServerRelationId, false},
 		{"password_required", UserMappingRelationId, false},
 
 		/*
@@ -525,6 +516,7 @@ process_pgfdw_appname(const char *appname)
 /*
  * Module load callback
  */
+#if 0
 void
 _PG_init(void)
 {
@@ -549,3 +541,4 @@ _PG_init(void)
 
 	//MarkGUCPrefixReserved("kite_fdw");
 }
+#endif

@@ -520,75 +520,6 @@ foreign_expr_walker(Node *node,
 				Const	   *c = (Const *) node;
 
 				/*
-				 * Constants of regproc and related types can't be shipped
-				 * unless the referenced object is shippable.  But NULL's ok.
-				 * (See also the related code in dependency.c.)
-				 */
-				if (!c->constisnull)
-				{
-					switch (c->consttype)
-					{
-						case REGPROCOID:
-						case REGPROCEDUREOID:
-							if (!is_shippable(DatumGetObjectId(c->constvalue),
-											  ProcedureRelationId, fpinfo))
-								return false;
-							break;
-						case REGOPEROID:
-						case REGOPERATOROID:
-							if (!is_shippable(DatumGetObjectId(c->constvalue),
-											  OperatorRelationId, fpinfo))
-								return false;
-							break;
-						case REGCLASSOID:
-							if (!is_shippable(DatumGetObjectId(c->constvalue),
-											  RelationRelationId, fpinfo))
-								return false;
-							break;
-						case REGTYPEOID:
-							if (!is_shippable(DatumGetObjectId(c->constvalue),
-											  TypeRelationId, fpinfo))
-								return false;
-							break;
-						case REGCOLLATIONOID:
-							if (!is_shippable(DatumGetObjectId(c->constvalue),
-											  CollationRelationId, fpinfo))
-								return false;
-							break;
-						case REGCONFIGOID:
-
-							/*
-							 * For text search objects only, we weaken the
-							 * normal shippability criterion to allow all OIDs
-							 * below FirstNormalObjectId.  Without this, none
-							 * of the initdb-installed TS configurations would
-							 * be shippable, which would be quite annoying.
-							 */
-							if (DatumGetObjectId(c->constvalue) >= FirstNormalObjectId &&
-								!is_shippable(DatumGetObjectId(c->constvalue),
-											  TSConfigRelationId, fpinfo))
-								return false;
-							break;
-						case REGDICTIONARYOID:
-							if (DatumGetObjectId(c->constvalue) >= FirstNormalObjectId &&
-								!is_shippable(DatumGetObjectId(c->constvalue),
-											  TSDictionaryRelationId, fpinfo))
-								return false;
-							break;
-						case REGNAMESPACEOID:
-							if (!is_shippable(DatumGetObjectId(c->constvalue),
-											  NamespaceRelationId, fpinfo))
-								return false;
-							break;
-						case REGROLEOID:
-							if (!is_shippable(DatumGetObjectId(c->constvalue),
-											  AuthIdRelationId, fpinfo))
-								return false;
-							break;
-					}
-				}
-
-				/*
 				 * If the constant has nondefault collation, either it's of a
 				 * non-builtin type, or it reflects folding of a CollateExpr.
 				 * It's unsafe to send to the remote unless it's used in a
@@ -1663,7 +1594,7 @@ deparseLockingClause(deparse_expr_cxt *context)
 		 * that DECLARE CURSOR ... FOR UPDATE is supported, which it isn't
 		 * before 8.3.
 		 */
-		if (bms_is_member(relid, root->parse->resultRelation) &&
+		if (relid == root->parse->resultRelation &&
 			(root->parse->commandType == CMD_UPDATE ||
 			 root->parse->commandType == CMD_DELETE))
 		{
@@ -1825,7 +1756,7 @@ deparseExplicitTargetList(List *tlist,
 			Aggref *aggref = (Aggref *) tle->expr;
 			*retrieved_aggfnoids = lappend_oid(*retrieved_aggfnoids, aggref->aggfnoid);
 		} else {
-			*retrieved_aggfnoids = lappend_oid(*retrieved_aggfnoids, 0);
+			*retrieved_aggfnoids = lappend_oid(*retrieved_aggfnoids, InvalidOid); // InvalidOid = 0
 		}
 
 		*retrieved_attrs = lappend_int(*retrieved_attrs, i + 1);
@@ -2098,142 +2029,6 @@ deparseRangeTblRef(StringInfo buf, PlannerInfo *root, RelOptInfo *foreignrel,
 	else
 		deparseFromExprForRel(buf, root, foreignrel, true, ignore_rel,
 							  ignore_conds, params_list);
-}
-
-/*
- * deparse remote INSERT statement
- *
- * The statement text is appended to buf, and we also create an integer List
- * of the columns being retrieved by WITH CHECK OPTION or RETURNING (if any),
- * which is returned to *retrieved_attrs.
- *
- * This also stores end position of the VALUES clause, so that we can rebuild
- * an INSERT for a batch of rows later.
- */
-void
-deparseInsertSql(StringInfo buf, RangeTblEntry *rte,
-				 Index rtindex, Relation rel,
-				 List *targetAttrs, bool doNothing,
-				 List *withCheckOptionList, List *returningList,
-				 List **retrieved_attrs, int *values_end_len)
-{
-	TupleDesc	tupdesc = RelationGetDescr(rel);
-	AttrNumber	pindex;
-	bool		first;
-	ListCell   *lc;
-
-	appendStringInfoString(buf, "INSERT INTO ");
-	deparseRelation(buf, rel);
-
-	if (targetAttrs)
-	{
-		appendStringInfoChar(buf, '(');
-
-		first = true;
-		foreach(lc, targetAttrs)
-		{
-			int			attnum = lfirst_int(lc);
-
-			if (!first)
-				appendStringInfoString(buf, ", ");
-			first = false;
-
-			deparseColumnRef(buf, rtindex, attnum, rte, false);
-		}
-
-		appendStringInfoString(buf, ") VALUES (");
-
-		pindex = 1;
-		first = true;
-		foreach(lc, targetAttrs)
-		{
-			int			attnum = lfirst_int(lc);
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-
-			if (!first)
-				appendStringInfoString(buf, ", ");
-			first = false;
-
-			if (attr->attgenerated)
-				appendStringInfoString(buf, "DEFAULT");
-			else
-			{
-				appendStringInfo(buf, "$%d", pindex);
-				pindex++;
-			}
-		}
-
-		appendStringInfoChar(buf, ')');
-	}
-	else
-		appendStringInfoString(buf, " DEFAULT VALUES");
-	*values_end_len = buf->len;
-
-	if (doNothing)
-		appendStringInfoString(buf, " ON CONFLICT DO NOTHING");
-
-	deparseReturningList(buf, rte, rtindex, rel,
-						 rel->trigdesc && rel->trigdesc->trig_insert_after_row,
-						 withCheckOptionList, returningList, retrieved_attrs);
-}
-
-/*
- * rebuild remote INSERT statement
- *
- * Provided a number of rows in a batch, builds INSERT statement with the
- * right number of parameters.
- */
-void
-rebuildInsertSql(StringInfo buf, Relation rel,
-				 char *orig_query, List *target_attrs,
-				 int values_end_len, int num_params,
-				 int num_rows)
-{
-	TupleDesc	tupdesc = RelationGetDescr(rel);
-	int			i;
-	int			pindex;
-	bool		first;
-	ListCell   *lc;
-
-	/* Make sure the values_end_len is sensible */
-	Assert((values_end_len > 0) && (values_end_len <= strlen(orig_query)));
-
-	/* Copy up to the end of the first record from the original query */
-	appendBinaryStringInfo(buf, orig_query, values_end_len);
-
-	/*
-	 * Add records to VALUES clause (we already have parameters for the first
-	 * row, so start at the right offset).
-	 */
-	pindex = num_params + 1;
-	for (i = 0; i < num_rows; i++)
-	{
-		appendStringInfoString(buf, ", (");
-
-		first = true;
-		foreach(lc, target_attrs)
-		{
-			int			attnum = lfirst_int(lc);
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-
-			if (!first)
-				appendStringInfoString(buf, ", ");
-			first = false;
-
-			if (attr->attgenerated)
-				appendStringInfoString(buf, "DEFAULT");
-			else
-			{
-				appendStringInfo(buf, "$%d", pindex);
-				pindex++;
-			}
-		}
-
-		appendStringInfoChar(buf, ')');
-	}
-
-	/* Copy stuff after VALUES clause from the original query */
-	appendStringInfoString(buf, orig_query + values_end_len);
 }
 
 /*
@@ -2609,38 +2404,6 @@ deparseAnalyzeSql(StringInfo buf, Relation rel, List **retrieved_attrs, int targ
 	}
 	appendStringInfo(buf, " LIMIT %lu", (unsigned long) targrows);
 
-}
-
-/*
- * Construct a simple "TRUNCATE rel" statement
- */
-void
-deparseTruncateSql(StringInfo buf,
-				   List *rels,
-				   DropBehavior behavior,
-				   bool restart_seqs)
-{
-	ListCell   *cell;
-
-	appendStringInfoString(buf, "TRUNCATE ");
-
-	foreach(cell, rels)
-	{
-		Relation	rel = lfirst(cell);
-
-		if (cell != list_head(rels))
-			appendStringInfoString(buf, ", ");
-
-		deparseRelation(buf, rel);
-	}
-
-	appendStringInfo(buf, " %s IDENTITY",
-					 restart_seqs ? "RESTART" : "CONTINUE");
-
-	if (behavior == DROP_RESTRICT)
-		appendStringInfoString(buf, " RESTRICT");
-	else if (behavior == DROP_CASCADE)
-		appendStringInfoString(buf, " CASCADE");
 }
 
 /*
