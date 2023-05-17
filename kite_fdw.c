@@ -76,6 +76,9 @@ PG_MODULE_MAGIC;
  * These items are indexed with the enum FdwScanPrivateIndex, so an item
  * can be fetched with list_nth().  For example, to get the SELECT statement:
  *		sql = strVal(list_nth(fdw_private, FdwScanPrivateSelectSql));
+ * REMINDER: items MUST be a PG node format that is serialized.  Non-serialized
+ * object will cause error with error message unrecognized node type: 0 (copyfuncs.c:6874).
+ * FdwScanPrivateIndex will pass between segments.
  */
 enum FdwScanPrivateIndex
 {
@@ -89,7 +92,7 @@ enum FdwScanPrivateIndex
 	FdwScanPrivateFetchSize,
 	/* Integer represeting the number of fragment in kite */
 	FdwScanPrivateFragCnt,
-	/* FileSpec (as kite_filespec_t) */
+	/* FileSpec (serialized kite_filespec_t as a String node) */
 	FdwScanPrivateFileSpec,
 
 	/*
