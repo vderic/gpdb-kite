@@ -233,7 +233,7 @@ static void finalize(void *context, const void *rec, void *data, AttInMetadata *
 				//finalize_avg();
 				avg_decode(aggfn, transdata, 0, attr, typmod, &datums[k-1], &flags[k-1]);
 			} else {
-				var_decode(transdata, 0, attr, typmod, &datums[k-1], &flags[k-1]);
+				var_decode(transdata, 0, attr, typmod, &datums[k-1], &flags[k-1], true);
 			}
 
 			for (int j = 0 ; j < top ; j++) {
@@ -245,7 +245,7 @@ static void finalize(void *context, const void *rec, void *data, AttInMetadata *
 			const char *p1 = p;
 			xrg_attr_t *attr1 = attr;
 			p = column_next(attr++, p);
-			var_decode((char *) p1, 0, attr1, typmod, &datums[k-1], &flags[k-1]);
+			var_decode((char *) p1, 0, attr1, typmod, &datums[k-1], &flags[k-1], true);
 		}
 	}
 

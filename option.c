@@ -252,7 +252,7 @@ InitPgFdwOptions(void)
 		{"sslkey", UserMappingRelationId, true},
 
 		/* kite specified options */
-		{"fragcnt", ForeignServerRelationId, false},
+		{"fragcnt", ForeignTableRelationId, false},
 		{"fmt", ForeignTableRelationId, false},
 		{"csv_delimiter", ForeignTableRelationId, false},
 		{"csv_quote", ForeignTableRelationId, false},

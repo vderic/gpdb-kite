@@ -8,11 +8,6 @@
 #include "aggtrans.h"
 #include "numeric.hpp"
 
-/* DISABLE POSTGRES_SUM_NUMERIC for GPDB */
-#if 0
-#define POSTGRES_SUM_NUMERIC 1
-#endif
-
 static inline Datum decode_int16(char *data) {
 	int16_t *p = (int16_t *)data;
 	return Int16GetDatum(*p);
@@ -65,7 +60,7 @@ static Datum decode_timestamp(char *data) {
 }
 
 /* decode functions */
-int var_decode(char *data, char flag, xrg_attr_t *attr, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+int var_decode(char *data, char flag, xrg_attr_t *attr, int atttypmod, Datum *pg_datum, bool *pg_isnull, bool int128_to_numeric) {
 	int ltyp = attr->ltyp;
 	int ptyp = attr->ptyp;
 	int precision = attr->precision;
@@ -91,8 +86,8 @@ int var_decode(char *data, char flag, xrg_attr_t *attr, int atttypmod, Datum *pg
 			*pg_datum = decode_int64(data);
 		} break;
 		case XRG_PTYP_INT128: {
-		        // postgres needs numeric but gpdb needs int128
-#ifdef POSTGRES_SUM_NUMERIC
+		        // SIMPLE_AGG needs numeric and PARTIAL_AGG needs int128
+		if (int128_to_numeric) {
                 	FmgrInfo flinfo;
                 	__int128_t v = *((__int128_t *)data);
                 	char dst[MAX_DEC128_STRLEN];
@@ -104,10 +99,9 @@ int var_decode(char *data, char flag, xrg_attr_t *attr, int atttypmod, Datum *pg
                 	flinfo.fn_nargs = 3;
                 	flinfo.fn_strict = true;
                 	*pg_datum = InputFunctionCall(&flinfo, dst, 0, atttypmod);
-#else
+		} else {
 			*pg_datum = decode_int128(data);
-
-#endif
+		}
 		} break;
 		case XRG_PTYP_FP32: {
 			*pg_datum = decode_float(data);
@@ -254,7 +248,7 @@ int agg_p_decode1(Oid aggfnoid, char *p, xrg_attr_t *attr, int atttypmod, Datum 
 
 	Datum datum;
 	bool isnull = false;
-	if (var_decode(p, 0, attr, atttypmod, &datum, &isnull)) {
+	if (var_decode(p, 0, attr, atttypmod, &datum, &isnull, false)) {
 		return 1;
 	}
 
@@ -288,12 +282,12 @@ int agg_p_decode2(Oid aggfnoid, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_
 	bool isnull;
 
 	/* sum */
-	if (var_decode(p1, 0, attr1, atttypmod, &sum, &isnull)) {
+	if (var_decode(p1, 0, attr1, atttypmod, &sum, &isnull, false)) {
 		return 1;
 	}
 
 	/* count */
-	if (var_decode(p2, 0, attr2, 0, &count, &isnull)) {
+	if (var_decode(p2, 0, attr2, 0, &count, &isnull, false)) {
 		return 1;
 	}
 

@@ -2728,8 +2728,6 @@ apply_server_options(PgFdwRelationInfo *fpinfo)
 				ExtractExtensionList(defGetString(def), false);
 		else if (strcmp(def->defname, "fetch_size") == 0)
 			fpinfo->fetch_size = strtol(defGetString(def), NULL, 10);
-		else if (strcmp(def->defname, "fragcnt") == 0)
-			(void)parse_int(defGetString(def), &fpinfo->fragcnt, 0, NULL);
 	}
 }
 
@@ -2763,6 +2761,8 @@ apply_table_options(PgFdwRelationInfo *fpinfo)
 			fpinfo->csv_nullstr = defGetString(def);
 		else if (strcmp(def->defname, "csv_header") == 0)
 			fpinfo->csv_header = defGetBoolean(def);
+		else if (strcmp(def->defname, "fragcnt") == 0)
+			(void)parse_int(defGetString(def), &fpinfo->fragcnt, 0, NULL);
 	}
 }
 
@@ -3728,7 +3728,7 @@ make_tuple_from_result_row(xrg_iter_t *iter,
 	foreach (lc, retrieved_attrs) {
 		int i = lfirst_int(lc);
 		var_decode(iter->value[j], *iter->flag[j], &iter->attr[j], attinmeta->atttypmods[i - 1],
-			&values[i - 1], &nulls[i - 1]);
+			&values[i - 1], &nulls[i - 1], true);
 		j++;
 	}
 
