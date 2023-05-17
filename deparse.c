@@ -1535,6 +1535,8 @@ deparseTargetList(StringInfo buf,
 		}
 	}
 
+#if 0
+	/* KITE don't support ctid */
 	/*
 	 * Add ctid if needed.  We currently don't support retrieving any other
 	 * system columns.
@@ -1555,6 +1557,7 @@ deparseTargetList(StringInfo buf,
 		*retrieved_attrs = lappend_int(*retrieved_attrs,
 									   SelfItemPointerAttributeNumber);
 	}
+#endif
 
 	/* Don't generate bad syntax if no undropped columns */
 	if (first && !is_returning)
