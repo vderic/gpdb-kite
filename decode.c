@@ -8,7 +8,10 @@
 #include "aggtrans.h"
 #include "numeric.hpp"
 
-#define POSTGRES_SUM_NUMERIC 1
+/* DISABLE POSTGRES_SUM_NUMERIC for GPDB */
+#if 0
+#define POSTGRES_SUM_NUMERIC 0
+#endif
 
 static inline Datum decode_int16(char *data) {
 	int16_t *p = (int16_t *)data;
