@@ -10,7 +10,7 @@
 
 /* DISABLE POSTGRES_SUM_NUMERIC for GPDB */
 #if 0
-#define POSTGRES_SUM_NUMERIC 0
+#define POSTGRES_SUM_NUMERIC 1
 #endif
 
 static inline Datum decode_int16(char *data) {
