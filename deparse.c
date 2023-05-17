@@ -2854,6 +2854,7 @@ deparseConst(Const *node, deparse_expr_cxt *context, int showtype)
 	{
 		case BOOLOID:
 		case INT4OID:
+		case INT8OID:
 		case UNKNOWNOID:
 			needlabel = false;
 			break;

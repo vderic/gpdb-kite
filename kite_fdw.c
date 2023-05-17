@@ -417,7 +417,7 @@ kiteGetForeignRelSize(PlannerInfo *root,
 	fpinfo->fdw_tuple_cost = DEFAULT_FDW_TUPLE_COST;
 	fpinfo->shippable_extensions = NIL;
 	fpinfo->fetch_size = 100;
-	fpinfo->fragcnt = 1;
+	fpinfo->fragcnt = -1;
 	fpinfo->csv_delim = ',';
 	fpinfo->csv_quote = '"';
 	fpinfo->csv_escape = '"';
@@ -819,8 +819,11 @@ kiteGetForeignPaths(PlannerInfo *root,
 								   NIL);	/* no fdw_private list */
 	add_path(baserel, (Path *) path);
 
+	/* KITE do not support ORDER BY */
+#if 0
 	/* Add paths with pathkeys */
 	add_paths_with_pathkeys_for_rel(root, baserel, NULL);
+#endif
 
 	/*
 	 * If we're not using remote estimates, stop here.  We have no way to
@@ -1285,7 +1288,6 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags)
 	int			rtindex;
 	int			numParams;
 
-	elog(LOG, "KITE Begin Foreign Scan");
 	/*
 	 * Do nothing in EXPLAIN (no ANALYZE) case.  node->fdw_state stays NULL.
 	 */
@@ -1373,7 +1375,7 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags)
 		fsstate->mpp_allsegment = false;
 		fsstate->fragid = -1;
 		if (fsstate->fragcnt < 0) {
-			elog(INFO, "fragcnt cannot be -1 when mpp_execute = 'master|any'. set fragcnt = 1.");
+			//elog(INFO, "fragcnt cannot be -1 when mpp_execute = 'master|any'. set fragcnt = 1.");
 			fsstate->fragcnt = 1;
 		}
 	}
@@ -1526,8 +1528,6 @@ kiteExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	List	   *fdw_private;
 	char	   *sql;
 	char	   *relations;
-
-	elog(LOG, "Explain Foreign Scan..................KITE");
 
 	fdw_private = ((ForeignScan *) node->ss.ps.plan)->fdw_private;
 
@@ -2195,8 +2195,22 @@ create_cursor(ForeignScanState *node)
 		MemoryContextSwitchTo(oldcontext);
 	}
 
+	elog(LOG, "CREATE CURSOR fragid = %d, fragcnt = %d", fsstate->fragid, fsstate->fragcnt);
+	if (fsstate->fragid >= 0 && fsstate->fragid >= fsstate->fragcnt) {
+	        /* Mark the cursor as created, and show no tuples have been retrieved */
+       		fsstate->cursor_exists = true;
+        	fsstate->tuples = NULL;
+        	fsstate->num_tuples = 0;
+        	fsstate->next_tuple = 0;
+        	fsstate->fetch_ct_2 = 0;
+        	fsstate->eof_reached = true;
+		req->hdl = NULL;
+		return;
+	}
+
+
 	/* kite_submit */
-	req->hdl = kite_submit(req->host, fsstate->schema, fsstate->query, -1, fsstate->fragcnt, fsstate->fspec, errmsg, sizeof(errmsg));
+	req->hdl = kite_submit(req->host, fsstate->schema, fsstate->query, fsstate->fragid, fsstate->fragcnt, fsstate->fspec, errmsg, sizeof(errmsg));
 	if (!req->hdl) {
 		elog(ERROR, "kite_submit failed");
 		return;
@@ -3085,8 +3099,8 @@ kiteGetForeignUpperPaths(PlannerInfo *root, UpperRelationKind stage,
 
 	/* Ignore stages we don't support; and skip any duplicate calls. */
 	if ((stage != UPPERREL_GROUP_AGG &&
-		 stage != UPPERREL_FINAL &&
-		 stage != UPPERREL_CDB_FIRST_STAGE_GROUP_AGG) ||
+		stage != UPPERREL_FINAL &&
+		stage != UPPERREL_CDB_FIRST_STAGE_GROUP_AGG) ||
 		output_rel->fdw_private)
 		return;
 

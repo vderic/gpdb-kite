@@ -88,22 +88,22 @@ Datum sum_p_numeric(PG_FUNCTION_ARGS) {
 
 /* float8 */
 Datum avg_p_float8(PG_FUNCTION_ARGS) {
-	FloatAvgAggState *state;
-	FmgrInfo flinfo;
 	int64 count = PG_GETARG_INT64(0);
 	float8 sum = PG_GETARG_FLOAT8(1);
+	float8 N = count;
+	float8 Sxx = 0;
+        Datum           transdatums[3];
+        ArrayType  *result;
 
-	state = palloc(sizeof(FloatAvgAggState));
-	SET_VARSIZE(state, sizeof(FloatAvgAggState));
-	state->arraytype.ndim = 1;
-	state->arraytype.dataoffset = (char *) state->data - (char *) state;
-	state->arraytype.elemtype = FLOAT8OID;
-	state->nelem = 3;
-	state->data[0] = count;
-	state->data[1] = sum;
-	state->data[2] = 0;
+        transdatums[0] = Float8GetDatumFast(N);
+        transdatums[1] = Float8GetDatumFast(sum);
+        transdatums[2] = Float8GetDatumFast(Sxx);
 
-	PG_RETURN_POINTER(state);
+        result = construct_array(transdatums, 3,
+                                                           FLOAT8OID,
+                                                           sizeof(float8), FLOAT8PASSBYVAL, 'd');
+
+        PG_RETURN_ARRAYTYPE_P(result);
 }
 
 PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
@@ -111,7 +111,7 @@ PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
 	if (aggfnoid == InvalidOid) 
 	{
 		return NULL;
-    }
+	}
 	switch (aggfnoid) 
 	{
 		case 2100:  // avg bigint
