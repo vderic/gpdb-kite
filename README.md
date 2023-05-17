@@ -61,6 +61,7 @@ Examples
 ```sql
 
 SET timezone = 'PST8PDT';
+-- optimizer MUST set to off in order to generate partial agg plan
 SET optimizer = off;
 SET optimizer_trace_fallback = on;
 -- If gp_enable_minmax_optimization is on, it won't generate aggregate functions pushdown plan.
