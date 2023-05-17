@@ -55,11 +55,6 @@ The following parameters can be set on a Kite foreign table object:
   * `csv_header`: csv file with header line. Default is false.
   * `csv_nullstr`: csv NULL string. Default is empty string.
 
-The following parameters need to supplied while creating user mapping.
-
-  * `username`: Username to use when connecting to Postgres.
-  * `password`: Password to authenticate to the Postgres server with.
-
 Examples
 --------
 
