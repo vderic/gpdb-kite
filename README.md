@@ -36,7 +36,6 @@ Usage
 The following parameters can be set on a Kite foreign server object:
 
   * `host`: List of addresses or hostname:port of the Kite servers separated by comma ','.
-  * `fragcnt`: The number of fragment per query. The default value is -1 (all segments).
   * `fetch_size`: This option specifies the number of rows kite_fdw should
     get in each fetch operation. It can be specified for a foreign table or
     a foreign server. The option specified on a table overrides an option
@@ -44,9 +43,8 @@ The following parameters can be set on a Kite foreign server object:
 
 The following parameters can be set on a Kite foreign table object:
 
-  * `schema_name`: Name of the Postgres schema.
-  * `table_name`: Name of the Postgres table, default is the same as
-    foreign table.
+  * `fragcnt`: The number of fragment per query. The default value is -1 (all segments).
+  * `table_name`: Path of Kite table.
   * `fetch_size`: Same as `fetch_size` parameter for foreign server.
   * `fmt`: data format. csv and parquet are supported.
   * `csv_delimiter`: csv delimiter. Default is ','.
@@ -86,7 +84,7 @@ CREATE FOREIGN TABLE warehouse
 		warehouse_created timestamp
 	)
 	SERVER kite_server
-	OPTIONS (schema_name 'public', table_name 'warehouse*', fmt 'csv', 
+	OPTIONS (table_name 'warehouse*', fmt 'csv', 
 	csv_delimiter '|', csv_quote '"', csv_escape '"', csv_header 'false', csv_nullstr '',
 	mpp_execute 'all segments');
 
