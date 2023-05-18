@@ -71,7 +71,7 @@ CREATE EXTENSION kite_fdw;
 -- create server object
 CREATE SERVER kite_server
 	FOREIGN DATA WRAPPER kite_fdw
-	OPTIONS (host '127.0.0.1:7878', fragcnt '-1');
+	OPTIONS (host '127.0.0.1:7878');
 
 -- create user mapping
 CREATE USER MAPPING FOR CURRENT_USER SERVER kite_server;
