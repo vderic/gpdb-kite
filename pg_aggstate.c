@@ -42,15 +42,6 @@
 #include "nodes/execnodes.h"
 
 
-/* Start of dependencies of internal struct from float8 */
-typedef struct FloatAvgAggState
-{
-        ArrayType arraytype;
-        int32   nelem;
-        float8  data[3];     // float8[3]
-} FloatAvgAggState;
-
-
 /* Start of depandancies of internal struct from numeric.c */
 typedef struct NumericSumAccum
 {
