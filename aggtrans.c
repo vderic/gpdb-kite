@@ -22,6 +22,7 @@ static Datum agg_p_int128(int64 count, int128 sum) {
 	state->sumX = sum;
 #else
 	// error out
+	elog(ERROR, "system not support int128");
 #endif
 
 	memset(&flinfo, 0, sizeof(FmgrInfo));
