@@ -13,8 +13,5 @@ Datum avg_p_float8(PG_FUNCTION_ARGS);
 
 PGFunction GetTranscodingFnFromOid(Oid aggfnoid);
 
-Datum transfn_to_polynumaggstate(PG_FUNCTION_ARGS);
-Datum transfn_to_numericaggstate(PG_FUNCTION_ARGS);
-
 #endif
 
