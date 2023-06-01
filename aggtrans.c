@@ -1,4 +1,9 @@
-#include "pg_aggstate.c"
+#include "postgres.h"
+#include "utils/array.h"
+#include "utils/fmgrprotos.h"
+#include "utils/numeric.h"
+#include "nodes/execnodes.h"
+
 #include "aggtrans.h"
 
 #define INIT_AGGSTATE(aggstate) \
@@ -6,6 +11,17 @@
 	Node *node = (Node *) &aggstate; \
 	memset(&aggstate, 0, sizeof(AggState)); \
 	node->type = T_AggState; \
+}
+
+static Datum CallAggfunction1(FmgrInfo *flinfo, Datum arg1, fmNodePtr *context)
+{
+	LOCAL_FCINFO(fcinfo, 1);
+
+	InitFunctionCallInfoData(*fcinfo, flinfo, 1, InvalidOid, (Node *)context, NULL);
+	fcinfo->args[0].value = arg1;
+	fcinfo->args[0].isnull = false;
+
+	return FunctionCallInvoke(fcinfo);
 }
 
 /* KITE */
