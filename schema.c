@@ -3,7 +3,7 @@
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_type_d.h"
 
-const char *xrg_typ_str(int16_t ptyp, int16_t ltyp) {
+static const char *xrg_typ_str(int16_t ptyp, int16_t ltyp) {
         switch (ptyp) {
         case XRG_PTYP_INT8:
                 return "int8";
@@ -60,7 +60,7 @@ const char *xrg_typ_str(int16_t ptyp, int16_t ltyp) {
         return "";
 }
 
-void pg_typ_to_xrg_typ(Oid t, int32_t typmod, int16_t *ptyp, int16_t *ltyp, int16_t *precision, int16_t *scale, bool *is_array) {
+static void pg_typ_to_xrg_typ(Oid t, int32_t typmod, int16_t *ptyp, int16_t *ltyp, int16_t *precision, int16_t *scale, bool *is_array) {
 	*is_array = false;
 	switch (t) {
 	case BOOLOID: {

@@ -391,7 +391,6 @@ void xrg_agg_destroy(xrg_agg_t *agg) {
 
 static int xrg_agg_process(xrg_agg_t *agg, xrg_iter_t *iter) {
 	ListCell *lc;
-	int ret = 0;
 
 	if (iter->nvec != agg->ncol) {
 		elog(ERROR, "xrg_agg_process: number of columns returned from kite not match (%d != %d)", 
@@ -399,7 +398,6 @@ static int xrg_agg_process(xrg_agg_t *agg, xrg_iter_t *iter) {
 		return 1;
 	}
 
-	int len = 0;
 	uint64_t hval = 0; // hash value of the groupby keys
 
 	if (! agg->attr) {

@@ -102,8 +102,6 @@ void xrg_agg_p_destroy(xrg_agg_p_t *agg) {
 
 
 int xrg_agg_p_get_next(xrg_agg_p_t *agg, xrg_iter_t *iter, AttInMetadata *attinmeta, Datum *datums, bool *flags, int n) {
-	ListCell *lc;
-	int ret = 0;
 
 	if (iter->nvec != agg->ncol) {
 		elog(ERROR, "xrg_agg_p_get_next: number of columns returned from kite not match (%d != %d)", 

@@ -41,7 +41,6 @@ static kite_request_t *connect_kite_server(ForeignServer *server, UserMapping *u
 		const char **values;
 		int			n;
 		char *host = NULL, *p;
-		int fragcnt = 1;
 
 		/*
 		 * Construct connection params from generic options of ForeignServer
