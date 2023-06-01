@@ -25,7 +25,7 @@ all: ext $(OBJS)
 ext:
 	make -C ext
 
-PGFILEDESC = "postgres_fdw - foreign data wrapper for PostgreSQL"
+PGFILEDESC = "kite_fdw - foreign data wrapper for Kite"
 
 PG_CPPFLAGS = -I$(libpq_srcdir) -Iext/include -DKITE_CONNECT -std=c++17
 SHLIB_LINK_INTERNAL = $(libpq) -Lext/lib -lkitesdk -levent -lxrg -lsproto -lhop -larrow -larrow_bundled_dependencies -llz4 -lstdc++ -std=c++17
