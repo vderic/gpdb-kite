@@ -342,8 +342,10 @@ static void build_tlist(xrg_agg_t *agg) {
 xrg_agg_t *xrg_agg_init(List *retrieved_attrs, List *aggfnoids, List *groupby_attrs) {
 
 	xrg_agg_t *agg = (xrg_agg_t*) malloc(sizeof(xrg_agg_t));
-	hagg_dispatch_t dispatch;
 	Assert(agg);
+
+	hagg_dispatch_t dispatch;
+	memset(&dispatch, 0, sizeof(dispatch));
 
 	agg->reached_eof = false;
 	agg->attr = 0;
