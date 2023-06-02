@@ -1,7 +1,7 @@
-Kite Foreign Data Wrapper for PostgreSQL
+Kite Foreign Data Wrapper for GPDB7
 =========================================
 
-This PostgreSQL extension implements a Foreign Data Wrapper (FDW) for
+This GPDB extension implements a Foreign Data Wrapper (FDW) for
 Kite.
 
 Installation
