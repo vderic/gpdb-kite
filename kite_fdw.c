@@ -4053,7 +4053,7 @@ static bool kite_get_relation_stats(PgFdwRelationInfo *fpinfo, Relation relation
 	}
 	
 	if (fpinfo->fragcnt <= 0) {
-		fpinfo->fragcnt = 1;
+		fpinfo->fragcnt = getgpsegmentCount();
 	}
 	//elog(LOG, "scheam %s", schema.data);
 	//elog(LOG, "fragcnt = %d", fpinfo->fragcnt);
