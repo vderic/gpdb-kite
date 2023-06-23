@@ -204,8 +204,8 @@ kite_fdw_validator(PG_FUNCTION_ARGS)
 		else if (strcmp(def->defname, "mpp_execute") == 0)
 		{
 			char *mpp_execute = defGetString(def);
-			if (strcmp(mpp_execute, "all segments") != 0 || strcmp(mpp_execute, "multi servers") != 0 ||
-					strcmp(mpp_execute, "any") != 0 || strcmp(mpp_execute, "master") != 0) {
+			if (strcmp(mpp_execute, "all segments") != 0 && strcmp(mpp_execute, "multi servers") != 0 &&
+					strcmp(mpp_execute, "any") != 0 && strcmp(mpp_execute, "master") != 0) {
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid value for mpp_execute option \"%s\": %s",
