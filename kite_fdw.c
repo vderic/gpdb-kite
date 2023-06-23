@@ -1361,7 +1361,7 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags)
 			FdwScanPrivateRetrievedGroupByAttrs);
 	}
 
-	if (table->exec_location == FTEXECLOCATION_ALL_SEGMENTS && Gp_role == GP_ROLE_EXECUTE) {
+	if (table->exec_location == FTEXECLOCATION_MULTI_SERVERS && Gp_role == GP_ROLE_EXECUTE) {
 		// parallel load here
 		fsstate->fragid = GpIdentity.segindex;
 
@@ -1374,7 +1374,7 @@ kiteBeginForeignScan(ForeignScanState *node, int eflags)
 
 		fsstate->mpp_allsegment = true;
 	} else {
-		// single server
+		// single server or all segments
 		fsstate->mpp_allsegment = false;
 		fsstate->fragid = -1;
 		if (fsstate->fragcnt < 0) {

@@ -201,6 +201,17 @@ kite_fdw_validator(PG_FUNCTION_ARGS)
 						 errmsg("sslcert and sslkey are superuser-only"),
 						 errhint("User mappings with the sslcert or sslkey options set may only be created or modified by the superuser.")));
 		}
+		else if (strcmp(def->defname, "mpp_execute") == 0)
+		{
+			char *mpp_execute = defGetString(def);
+			if (strcmp(mpp_execute, "all segments") != 0 || strcmp(mpp_execute, "multi servers") != 0 ||
+					strcmp(mpp_execute, "any") != 0 || strcmp(mpp_execute, "master") != 0) {
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid value for mpp_execute option \"%s\": %s",
+							 def->defname, mpp_execute)));
+			}
+		}
 	}
 
 	PG_RETURN_VOID();
@@ -221,6 +232,9 @@ InitPgFdwOptions(void)
 		{"schema_name", ForeignTableRelationId, false},
 		{"table_name", ForeignTableRelationId, false},
 		{"column_name", AttributeRelationId, false},
+		/* mpp_execute */
+		{"mpp_execute", ForeignServerRelationId, false},
+		{"mpp_execute", ForeignTableRelationId, false},
 		/* use_remote_estimate is available on both server and table */
 		{"use_remote_estimate", ForeignServerRelationId, false},
 		{"use_remote_estimate", ForeignTableRelationId, false},
