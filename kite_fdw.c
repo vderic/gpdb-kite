@@ -2516,7 +2516,7 @@ kiteAcquireSampleRowsFunc(Relation relation, int elevel,
 	fpinfo->table = GetForeignTable(relation->rd_id);
 	fpinfo->server = GetForeignServer(fpinfo->table->serverid);
 
-	fpinfo->fragcnt = 1;
+	fpinfo->fragcnt = -1;
 	fpinfo->csv_delim = ',';
 	fpinfo->csv_quote = '"';
 	fpinfo->csv_escape = '"';
