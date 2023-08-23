@@ -60,7 +60,7 @@ static Datum decode_timestamp(char *data) {
 }
 
 /* decode functions */
-int var_decode(char *data, char flag, xrg_attr_t *attr, int atttypmod, Datum *pg_datum, bool *pg_isnull, bool int128_to_numeric) {
+int var_decode(char *data, char flag, xrg_attr_t *attr, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull, bool int128_to_numeric) {
 	int ltyp = attr->ltyp;
 	int ptyp = attr->ptyp;
 	int precision = attr->precision;
@@ -180,7 +180,7 @@ int var_decode(char *data, char flag, xrg_attr_t *attr, int atttypmod, Datum *pg
 	return 0;
 }
 
-int avg_decode(Oid aggfn, char *data, char flag, xrg_attr_t *attr, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+int avg_decode(Oid aggfn, char *data, char flag, xrg_attr_t *attr, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
 
 	avg_trans_t *accum = (avg_trans_t *)data;
 
@@ -244,11 +244,11 @@ int avg_decode(Oid aggfn, char *data, char flag, xrg_attr_t *attr, int atttypmod
 	return 0;
 }
 
-int agg_p_decode1(Oid aggfnoid, char *p, xrg_attr_t *attr, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+int agg_p_decode1(Oid aggfnoid, char *p, xrg_attr_t *attr, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
 
 	Datum datum;
 	bool isnull = false;
-	if (var_decode(p, 0, attr, atttypmod, &datum, &isnull, false)) {
+	if (var_decode(p, 0, attr, atttypid, atttypmod, &datum, &isnull, false)) {
 		return 1;
 	}
 
@@ -275,19 +275,19 @@ int agg_p_decode1(Oid aggfnoid, char *p, xrg_attr_t *attr, int atttypmod, Datum 
 	return 0;
 }
 
-int agg_p_decode2(Oid aggfnoid, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_t *attr2, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+int agg_p_decode2(Oid aggfnoid, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_t *attr2, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
 
 	Datum sum;
 	Datum count;
 	bool isnull;
 
 	/* sum */
-	if (var_decode(p1, 0, attr1, atttypmod, &sum, &isnull, false)) {
+	if (var_decode(p1, 0, attr1, atttypid, atttypmod, &sum, &isnull, false)) {
 		return 1;
 	}
 
 	/* count */
-	if (var_decode(p2, 0, attr2, 0, &count, &isnull, false)) {
+	if (var_decode(p2, 0, attr2, atttypid, 0, &count, &isnull, false)) {
 		return 1;
 	}
 

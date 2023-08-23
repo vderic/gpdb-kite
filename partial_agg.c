@@ -114,14 +114,16 @@ int xrg_agg_p_get_next(xrg_agg_p_t *agg, xrg_iter_t *iter, AttInMetadata *attinm
 		int k = tgt->pgattr;
 		int nkiteattr = list_length(tgt->attrs);
 		Oid aggfn = tgt->aggfn;
-		int typmod = (attinmeta) ? attinmeta->atttypmods[k-1] : 0;
+		int atttypmod = (attinmeta) ? attinmeta->atttypmods[k-1] : 0;
+		//Form_pg_attribute pg_attr = (attinmeta) ? &attinmeta->tupdesc->attrs[k-1] : 0;
+		Oid atttypid = (attinmeta) ? attinmeta->tupdesc->attrs[k-1].atttypid : 0;
 
 		if (nkiteattr == 1) {
 			char *p = iter->value[j];
 			xrg_attr_t *attr = &iter->attr[j];
 			j++;
 
-			agg_p_decode1(aggfn, p, attr, typmod, &datums[k-1], &flags[k-1]);
+			agg_p_decode1(aggfn, p, attr, atttypid, atttypmod, &datums[k-1], &flags[k-1]);
 
 		} else if (nkiteattr == 2) {
 			char *p1, *p2;
@@ -132,7 +134,7 @@ int xrg_agg_p_get_next(xrg_agg_p_t *agg, xrg_iter_t *iter, AttInMetadata *attinm
 			p2 = iter->value[j];
 			attr2 = &iter->attr[j];
 			j++;
-			agg_p_decode2(aggfn, p1, attr1, p2, attr2, typmod, &datums[k-1], &flags[k-1]);
+			agg_p_decode2(aggfn, p1, attr1, p2, attr2, atttypid, atttypmod, &datums[k-1], &flags[k-1]);
 		} else {
 			elog(ERROR, "xrg_agg_p_get_next: aggregate function won't have more than 2 columns");
 			return 1;
