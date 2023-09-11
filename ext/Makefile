@@ -1,15 +1,9 @@
 TOPDIR = ..
-JSONTAR = json-c.tar.gz
-JSONDIR = $(JSONTAR:.tar.gz=)
-XRGTAR = xrg-r220920.zip
-XRGDIR = $(XRGTAR:.zip=)
 ARROWZIP = apache-arrow-7.0.0-static.zip
 ARROWDIR = $(ARROWZIP:.zip=)
-SOCKSTREAMTAR = sockstream-r220819.zip
-SOCKSTREAMDIR = $(SOCKSTREAMTAR:.zip=)
 HOPZIP = hop-r230213.zip
 HOPDIR = $(HOPZIP:.zip=)
-KITESDKZIP = kite-client-sdk-r221121.zip
+KITESDKZIP = kite-client-sdk-r230911.zip
 KITESDKDIR = $(KITESDKZIP:.zip=)
 
 
