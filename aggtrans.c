@@ -48,10 +48,23 @@ static Datum agg_p_int128(int64 count, int128 sum) {
 	return CallAggfunction1(&flinfo, (Datum)state, (fmNodePtr *)&aggstate);
 }
 
+/* Int8TransTypeData. expected 2-element int8 array (numeric.c:5799) */
 Datum avg_p_int64(PG_FUNCTION_ARGS) {
 	int64 count = PG_GETARG_INT64(0);
 	int64 sum = PG_GETARG_INT64(1);
-	return agg_p_int128(count, sum);
+
+	int sz = ARR_OVERHEAD_NONULLS(1);
+	sz += 2 * sizeof(int64_t);
+	ArrayType *arr = (ArrayType *) palloc(sz);
+	SET_VARSIZE(arr, sz);
+	arr->ndim = 1;
+	arr->dataoffset = 0;
+	arr->elemtype =  INT8OID;
+	int64_t *p = (int64_t *) ARR_DATA_PTR(arr);
+	p[0] = count;
+	p[1] = sum;
+
+	PG_RETURN_ARRAYTYPE_P(arr);
 }
 
 Datum avg_p_int128(PG_FUNCTION_ARGS) {
