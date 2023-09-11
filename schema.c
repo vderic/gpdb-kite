@@ -276,7 +276,7 @@ void kite_build_schema(StringInfo schema, TupleDesc tupdesc) {
 		char *colname = NameStr(attr->attname);
 		const char *type = xrg_typ_str(ptyp, ltyp, is_array);
 
-		if (strcmp(type, "decimal") == 0) {
+		if (strcmp(type, "decimal") == 0 || strcmp(type, "decimal[]") == 0) {
 			appendStringInfo(schema, "%s:%s:%d:%d\n", colname, type, precision, scale);
 
 		} else {
