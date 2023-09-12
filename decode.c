@@ -697,11 +697,11 @@ int avg_decode(Oid aggfn, char *data, char flag, xrg_attr_t *attr, Oid atttypid,
 	return 0;
 }
 
-int agg_p_decode1(Oid aggfnoid, char *p, xrg_attr_t *attr, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+int agg_p_decode1(Oid aggfnoid, char *p, char flag, xrg_attr_t *attr, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
 
 	Datum datum;
 	bool isnull = false;
-	if (var_decode(p, 0, attr, atttypid, atttypmod, &datum, &isnull, false)) {
+	if (var_decode(p, flag, attr, atttypid, atttypmod, &datum, &isnull, false)) {
 		return 1;
 	}
 
@@ -718,29 +718,29 @@ int agg_p_decode1(Oid aggfnoid, char *p, xrg_attr_t *attr, Oid atttypid, int att
 		fcinfo->args[0].value = datum;
 		fcinfo->args[0].isnull = false;
 
-		*pg_isnull = false;
+		*pg_isnull = isnull;
 		*pg_datum = FunctionCallInvoke(fcinfo);
 	} else {
-		*pg_isnull = false;
+		*pg_isnull = isnull;
 		*pg_datum = datum;
 	}
 
 	return 0;
 }
 
-int agg_p_decode2(Oid aggfnoid, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_t *attr2, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+int agg_p_decode2(Oid aggfnoid, char *p1, char f1, xrg_attr_t *attr1, char *p2, char f2, xrg_attr_t *attr2, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
 
 	Datum sum;
 	Datum count;
-	bool isnull;
+	bool isnull_count, isnull_sum;
 
 	/* sum */
-	if (var_decode(p1, 0, attr1, atttypid, atttypmod, &sum, &isnull, false)) {
+	if (var_decode(p1, f1, attr1, atttypid, atttypmod, &sum, &isnull_sum, false)) {
 		return 1;
 	}
 
 	/* count */
-	if (var_decode(p2, 0, attr2, atttypid, 0, &count, &isnull, false)) {
+	if (var_decode(p2, f2, attr2, atttypid, 0, &count, &isnull_count, false)) {
 		return 1;
 	}
 
@@ -759,9 +759,9 @@ int agg_p_decode2(Oid aggfnoid, char *p1, xrg_attr_t *attr1, char *p2, xrg_attr_
 	LOCAL_FCINFO(fcinfo, 2);
 	InitFunctionCallInfoData(*fcinfo, &flinfo, 2, InvalidOid, 0, 0);
 	fcinfo->args[0].value = count;
-	fcinfo->args[0].isnull = false;
+	fcinfo->args[0].isnull = isnull_count;
 	fcinfo->args[1].value = sum;
-	fcinfo->args[1].isnull = false;
+	fcinfo->args[1].isnull = isnull_sum;
 
 	*pg_isnull = false;
 	*pg_datum = FunctionCallInvoke(fcinfo);

@@ -120,21 +120,25 @@ int xrg_agg_p_get_next(xrg_agg_p_t *agg, xrg_iter_t *iter, AttInMetadata *attinm
 
 		if (nkiteattr == 1) {
 			char *p = iter->value[j];
+			char flag = *iter->flag[j];
 			xrg_attr_t *attr = &iter->attr[j];
 			j++;
 
-			agg_p_decode1(aggfn, p, attr, atttypid, atttypmod, &datums[k-1], &flags[k-1]);
+			agg_p_decode1(aggfn, p, flag, attr, atttypid, atttypmod, &datums[k-1], &flags[k-1]);
 
 		} else if (nkiteattr == 2) {
 			char *p1, *p2;
+			char f1, f2;
 			xrg_attr_t *attr1, *attr2;
 			p1 = iter->value[j];
+			f1 = *iter->flag[j];
 			attr1 = &iter->attr[j];
 			j++;
 			p2 = iter->value[j];
+			f2 = *iter->flag[j];
 			attr2 = &iter->attr[j];
 			j++;
-			agg_p_decode2(aggfn, p1, attr1, p2, attr2, atttypid, atttypmod, &datums[k-1], &flags[k-1]);
+			agg_p_decode2(aggfn, p1, f1, attr1, p2, f2, attr2, atttypid, atttypmod, &datums[k-1], &flags[k-1]);
 		} else {
 			elog(ERROR, "xrg_agg_p_get_next: aggregate function won't have more than 2 columns");
 			return 1;
