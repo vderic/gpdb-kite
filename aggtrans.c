@@ -53,13 +53,19 @@ Datum avg_p_int64(PG_FUNCTION_ARGS) {
 	int64 count = PG_GETARG_INT64(0);
 	int64 sum = PG_GETARG_INT64(1);
 
-	int sz = ARR_OVERHEAD_NONULLS(1);
-	sz += 2 * sizeof(int64_t);
+	int ndim = 1;
+	int nelem = 2;
+	int sz = ARR_OVERHEAD_NONULLS(ndim);
+	sz += nelem * sizeof(int64_t);
 	ArrayType *arr = (ArrayType *) palloc(sz);
 	SET_VARSIZE(arr, sz);
-	arr->ndim = 1;
+	arr->ndim = ndim;
 	arr->dataoffset = 0;
 	arr->elemtype =  INT8OID;
+	int *dims = ARR_DIMS(arr);
+	int *lbs = ARR_LBOUND(arr);
+	dims[0] = nelem;
+	lbs[0] = 1;
 	int64_t *p = (int64_t *) ARR_DATA_PTR(arr);
 	p[0] = count;
 	p[1] = sum;
