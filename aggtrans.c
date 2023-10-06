@@ -122,6 +122,12 @@ Datum sum_p_numeric(PG_FUNCTION_ARGS) {
 	return agg_p_numeric(count, sum);
 }
 
+Datum sum_p_float4(PG_FUNCTION_ARGS) {
+        float8 sum = PG_GETARG_FLOAT8(0);
+	float sumf = (float) sum;
+        return Float4GetDatum(sumf);
+}
+
 /* float8 */
 Datum avg_p_float8(PG_FUNCTION_ARGS) {
 	int64 count = PG_GETARG_INT64(0);
@@ -161,6 +167,10 @@ PGFunction GetTranscodingFnFromOid(Oid aggfnoid) {
 		case 2107:
 			 /* - 2107 pg_catalog.sum int8|bigint */
 			refnaddr = sum_p_int128;
+			break;
+		case 2110:
+			/* - 2110 pg_catalog.sum float */
+			refnaddr = sum_p_float4;
 			break;
 		case 2103:
 			/* - 2103 pg_catalog.avg numeric */

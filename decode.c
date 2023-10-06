@@ -541,7 +541,8 @@ int var_decode(char *data, char flag, xrg_attr_t *attr, Oid atttypid, int atttyp
 
 	if (ltyp == XRG_LTYP_DECIMAL && ptyp == XRG_PTYP_INT128) {
 		FmgrInfo flinfo;
-		__int128_t v = *((__int128_t *)data);
+		__int128_t v;
+	        memcpy(&v, data, sizeof(__int128_t));
 		char dst[MAX_DEC128_STRLEN];
 		decimal128_to_string(v, precision, scale, dst, sizeof(dst));
 		memset(&flinfo, 0, sizeof(FmgrInfo));
@@ -565,13 +566,13 @@ int var_decode(char *data, char flag, xrg_attr_t *attr, Oid atttypid, int atttyp
 
 	// TODO: date, timestamp, numeric need further processing
 	if (ltyp == XRG_LTYP_ARRAY && ptyp == XRG_PTYP_BYTEA) {
-		xrg_array_header_t *ptr = (xrg_array_header_t *) xrg_bytea_ptr(data);
-		int sz = xrg_bytea_len(data);
-		//int16_t array_ptyp = xrg_array_ptyp(ptr);
-		int16_t array_ltyp = xrg_array_ltyp(ptr);
 		if (flag & XRG_FLAG_NULL) {
 			*pg_datum = 0;
 		} else {
+			xrg_array_header_t *ptr = (xrg_array_header_t *) xrg_bytea_ptr(data);
+			int sz = xrg_bytea_len(data);
+			//int16_t array_ptyp = xrg_array_ptyp(ptr);
+			int16_t array_ltyp = xrg_array_ltyp(ptr);
 
 			switch (array_ltyp) {
 			case XRG_LTYP_DATE:
@@ -602,6 +603,15 @@ int var_decode(char *data, char flag, xrg_attr_t *attr, Oid atttypid, int atttyp
 		return 0;
 	}
 
+	return 0;
+}
+
+int sum_float_decode(Oid aggfn, char *data, char flag, xrg_attr_t *attr, Oid atttypid, int atttypmod, Datum *pg_datum, bool *pg_isnull) {
+	(void) aggfn;
+	double v = *((double *) data);
+	float f = (float) v;
+	*pg_isnull = (flag & XRG_FLAG_NULL);
+	*pg_datum = Float4GetDatum(f);
 	return 0;
 }
 
@@ -707,6 +717,11 @@ int agg_p_decode1(Oid aggfnoid, char *p, char flag, xrg_attr_t *attr, Oid atttyp
 		return 1;
 	}
 
+	if (isnull) {
+		*pg_isnull = true;
+		*pg_datum = 0;
+	}
+
 	PGFunction fn = GetTranscodingFnFromOid(aggfnoid);
 	if (fn) {
 		FmgrInfo flinfo;
@@ -744,6 +759,11 @@ int agg_p_decode2(Oid aggfnoid, char *p1, char f1, xrg_attr_t *attr1, char *p2, 
 	/* count */
 	if (var_decode(p2, f2, attr2, atttypid, 0, &count, &isnull_count, false)) {
 		return 1;
+	}
+
+	if (isnull_sum) {
+		*pg_datum = 0;
+		*pg_isnull = true;
 	}
 
 	PGFunction fn = GetTranscodingFnFromOid(aggfnoid);
