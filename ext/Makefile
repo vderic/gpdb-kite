@@ -1,7 +1,7 @@
 TOPDIR = ..
 ARROWZIP = apache-arrow-7.0.0-static.zip
 ARROWDIR = $(ARROWZIP:.zip=)
-HOPZIP = hop-r230213.zip
+HOPZIP = hop-r231023a.zip
 HOPDIR = $(HOPZIP:.zip=)
 KITESDKZIP = kite-client-sdk-r230911.zip
 KITESDKDIR = $(KITESDKZIP:.zip=)
