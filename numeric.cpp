@@ -174,10 +174,11 @@ int avg_int128_finalize(__int128_t i128sum, int64_t i64count, __int128_t *avg, i
 #if 0
 
 int get_precision(const arrow::Decimal128 &dec) {
-	if (dec.high_bits() == 0 || dec.high_bits() == -1) {
-		return count_digit(dec.low_bits());
+	arrow::Decimal128 abs = arrow::Decimal128::Abs(dec);
+	if (abs.high_bits() == 0) {
+		return count_digit(abs.low_bits());
 	} 
-	return count_digit(static_cast<uint64_t>(dec.high_bits())) + 20;
+	return count_digit(static_cast<uint64_t>(abs.high_bits())) + 20;
 }
 
 static constexpr int floor_log10_pow2(int e) noexcept {
