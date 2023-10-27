@@ -174,7 +174,7 @@ int avg_int128_finalize(__int128_t i128sum, int64_t i64count, __int128_t *avg, i
 #if 0
 
 int get_precision(const arrow::Decimal128 &dec) {
-	if (dec.high_bits() == 0) {
+	if (dec.high_bits() == 0 || dec.high_bits() == -1) {
 		return count_digit(dec.low_bits());
 	} 
 	return count_digit(static_cast<uint64_t>(dec.high_bits())) + 20;
