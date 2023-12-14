@@ -2,6 +2,9 @@
 #include "access/tupdesc.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_type_d.h"
+#include "utils/lsyscache.h"
+#include "foreign/foreign.h"
+#include "commands/defrem.h"
 
 
 static const char *xrg_typ_str(int16_t ptyp, int16_t ltyp, bool is_array) {
@@ -61,6 +64,7 @@ static const char *xrg_typ_str(int16_t ptyp, int16_t ltyp, bool is_array) {
 	return "";
 }
 
+// select * from pg_type where typname = 'vector';
 static void pg_typ_to_xrg_typ(Oid t, int32_t typmod, int16_t *ptyp, int16_t *ltyp, int16_t *precision, int16_t *scale, bool *is_array) {
 	*is_array = false;
 	switch (t) {
@@ -255,15 +259,26 @@ static void pg_typ_to_xrg_typ(Oid t, int32_t typmod, int16_t *ptyp, int16_t *lty
 	}
 		return;
 	default: {
-		*ptyp = XRG_PTYP_BYTEA;
-		*ltyp = XRG_LTYP_STRING;
+		char *tname = get_type_name(t);
+		if (tname && strcmp(tname, "vector") == 0) {
+			*ptyp = XRG_PTYP_FP32;
+			*ltyp = XRG_LTYP_NONE;
+			*is_array = true;
+			// typmod = ndim
+		} else {
+			*ptyp = XRG_PTYP_BYTEA;
+			*ltyp = XRG_LTYP_STRING;
+		}
 	}
 		return;
 	}
 }
 
-void kite_build_schema(StringInfo schema, TupleDesc tupdesc) {
+void kite_build_schema(StringInfo schema, Oid relid, TupleDesc tupdesc) {
 	int i;
+        char       *colname;
+        List       *options;
+        ListCell   *lc;
 
 	for (i = 1 ; i <= tupdesc->natts ; i++) {
 		int16_t ptyp, ltyp, precision, scale;
@@ -273,7 +288,21 @@ void kite_build_schema(StringInfo schema, TupleDesc tupdesc) {
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, i - 1);
 
 		pg_typ_to_xrg_typ(attr->atttypid, attr->atttypmod, &ptyp, &ltyp, &precision, &scale, &is_array);
-		char *colname = NameStr(attr->attname);
+		colname = NameStr(attr->attname);
+                /* Use attribute name or column_name option. */
+                options = GetForeignColumnOptions(relid, i);
+
+                foreach(lc, options)
+                {
+                        DefElem    *def = (DefElem *) lfirst(lc);
+
+                        if (strcmp(def->defname, "column_name") == 0)
+                        {
+                                colname = defGetString(def);
+				break;
+                        }
+                }
+
 		const char *type = xrg_typ_str(ptyp, ltyp, is_array);
 
 		if (strcmp(type, "decimal") == 0 || strcmp(type, "decimal[]") == 0) {
@@ -283,5 +312,6 @@ void kite_build_schema(StringInfo schema, TupleDesc tupdesc) {
 			appendStringInfo(schema, "%s:%s\n", colname, type);
 		}
 	}
+
 }
 

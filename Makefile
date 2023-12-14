@@ -18,7 +18,8 @@ OBJS = \
 	partial_agg.o \
 	agg.o \
 	aggtrans.o \
-	serialize.o
+	serialize.o \
+	vector.o
 
 all: ext $(OBJS)
 
