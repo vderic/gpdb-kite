@@ -1,6 +1,12 @@
 #include "postgres.h"
 
 #include "vector.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
+#include "utils/typcache.h"
 
 Vector *
 InitVector(int dim)
@@ -14,5 +20,28 @@ InitVector(int dim)
 	result->dim = dim;
 
 	return result;
+}
+
+bool cmp_type_name(Oid oid, const char *type_name)
+{
+        HeapTuple       tp;
+
+        tp = SearchSysCache(TYPEOID,
+                                                ObjectIdGetDatum(oid),
+                                                0, 0, 0);
+        if (HeapTupleIsValid(tp))
+        {
+                Form_pg_type typtup = (Form_pg_type) GETSTRUCT(tp);
+                bool result = false;
+
+                if (strcmp(NameStr(typtup->typname), type_name) == 0) {
+                        result = true;
+                }
+                ReleaseSysCache(tp);
+                return result;
+        }
+        else {
+                return false;
+        }
 }
 
